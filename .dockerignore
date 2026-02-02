@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Editor/IDE files
+.vscode
+.cursor
+
+# Dependencies
+node_modules
+
+# Experimental/development directories
+exp
+tmp-*
+sweeps
+backtest-data
+
+# Logs and output
+logs
+*.log
+nul
+*.tgz
+.report.*.*
+
+# Lockfiles - temporary artifacts
+*.tmp
+.lock-*.tmp
+
+# Caches and build artifacts
+coverage
+*.lcov
+.cache
+.eslintcache
+*.tsbuildinfo
+out
+dist
+
+# Environment files
+.env
+.env.*.local
+
+# System files
+.DS_Store
+.idea

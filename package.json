@@ -1,0 +1,28 @@
+{
+  "name": "poly-saturate-bot",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run exp/example-usage.ts",
+    "cli": "bun run exp/example-usage.ts",
+    "monitor": "bun run exp/example-usage.ts monitor",
+    "high-volume": "bun run exp/example-usage.ts high-volume",
+    "trading-bot": "bun run exp/example-usage.ts trading-bot",
+    "alert": "bun run exp/example-usage.ts alert",
+    "multi": "bun run exp/example-usage.ts multi"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/unzipper": "^0.10.11"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ethersproject/wallet": "^5.8.0",
+    "@polymarket/clob-client": "^5.2.1",
+    "prompts": "latest",
+    "unzipper": "^0.12.3"
+  }
+}
