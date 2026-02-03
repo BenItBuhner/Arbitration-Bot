@@ -16,6 +16,10 @@ bun run main.ts -- --help
 
 # Quick automated fake trade
 bun run main.ts -- --fake-trade -- --auto
+
+# Fake trade on Kalshi (provider prompt or flag)
+MARKET_PROVIDER=kalshi bun run main.ts -- --fake-trade -- --auto
+bun run main.ts -- --fake-trade -- --provider kalshi -- --auto
 ```
 
 ## Features
@@ -106,6 +110,9 @@ bun run main.ts -- --trading
 --profiles <name1,name2>            # Select trading profiles
 --coins <eth,btc,sol,xrp>           # Select cryptocurrencies
 --auto                              # Auto-select all profiles/coins
+--provider <polymarket|kalshi>      # Select market provider
+--kalshi | --polymarket             # Provider shortcuts
+--headless                          # Disable dashboard UI
 ```
 
 ### Watch Market Options
@@ -129,27 +136,70 @@ bun run main.ts -- --trading
 
 ## Configuration
 
-Edit `config.json` to customize trading strategies. Strategies are time-based, with different parameters based on seconds remaining before market close.
+Edit `config.json` to customize trading strategies. The config is provider-first with market groups.
 
 ```json
 {
-  "aggressiveTrader": {
-    "ethereum": {
-      "120": {
-        "minimumPriceDifference": 5,      // Required price difference ($)
-        "maximumSharePrice": 0.99,       // Max share price to buy
-        "minimumSharePrice": 0.8,        // Min share price to buy
-        "maximumSpend": 50,              // Max trade amount ($)
-        "minimumSpend": 1.5              // Min trade amount ($)
+  "schemaVersion": 2,
+  "providers": {
+    "polymarket": {
+      "coins": ["eth", "btc"],
+      "marketGroups": [
+        { "id": "updown-15m", "match": { "slugRegex": "^(eth|btc)-.*-15m-" } },
+        { "id": "default", "match": {} }
+      ],
+      "profiles": {
+        "aggressiveTrader": {
+          "markets": {
+            "updown-15m": {
+              "eth": {
+                "120": {
+                  "minimumPriceDifference": 5,
+                  "maximumSharePrice": 0.99,
+                  "minimumSharePrice": 0.8,
+                  "maximumSpend": 50,
+                  "minimumSpend": 1.5
+                },
+                "tradeAllowedTimeLeft": 480
+              }
+            }
+          }
+        }
+      }
+    },
+    "kalshi": {
+      "coins": {
+        "eth": {
+          "tickers": ["KXETH15M-26FEB021730"],
+          "seriesTickers": ["KXETH15M"],
+          "eventTickers": [],
+          "marketUrls": [
+            "https://kalshi.com/markets/kxeth15m/eth-15m-price-up-down/kxeth15m-26feb021730"
+          ],
+          "autoDiscover": true
+        }
       },
-      "240": { "minimumPriceDifference": 6, ... },
-      "360": { "minimumPriceDifference": 7, ... },
-      "480": { "minimumPriceDifference": 8, ... },
-      "tradeAllowedTimeLeft": 480        // Max seconds remaining to trade
+      "marketGroups": [{ "id": "default", "match": {} }],
+      "profiles": {
+        "aggressiveTrader": {
+          "markets": {
+            "default": {
+              "btc": { "...": "same TimedTradeConfig shape" }
+            }
+          }
+        }
+      }
     }
   }
 }
 ```
+
+Kalshi selector notes:
+- `tickers`: explicit market tickers (bot will prefer these if open)
+- `seriesTickers`: series-level tickers to auto-discover the current open market
+- `eventTickers`: event-level tickers to auto-discover the current open market
+- `marketUrls`: full Kalshi market URLs (the bot extracts the series/market tickers)
+- `autoDiscover`: when `true`, the bot uses Kalshi's market list APIs to rotate to the latest open market as older ones close
 
 ### Advanced Configuration Fields
 Additional fields available per time bracket:

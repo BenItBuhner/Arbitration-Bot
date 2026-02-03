@@ -206,7 +206,7 @@ export class BacktestRunner {
       const activeProfile = profileViews[activeIndex];
       const activeCoin =
         activeProfile && activeProfile.markets.length > 0
-          ? activeProfile.markets[0].coin
+          ? activeProfile.markets[0]?.coin ?? null
           : this.options.selectedCoins[0] || null;
       const activeCoinHistory = activeCoin
         ? snapshots.get(activeCoin)?.priceHistory || []
@@ -275,7 +275,7 @@ export class BacktestRunner {
     const activeProfile = profileViews[activeIndex];
     const activeCoin =
       activeProfile && activeProfile.markets.length > 0
-        ? activeProfile.markets[0].coin
+        ? activeProfile.markets[0]?.coin ?? null
         : this.options.selectedCoins[0] || null;
     const activeCoinHistory = activeCoin
       ? snapshots.get(activeCoin)?.priceHistory || []

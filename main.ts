@@ -6,6 +6,7 @@ import { backtestRoute } from "./src/routes/backtest";
 import { selectOne } from "./src/cli/prompts";
 
 type CLIMode = "fake-trade" | "watch-market" | "trading" | "backtest";
+type Provider = "polymarket" | "kalshi";
 
 interface CLIArgs {
   mode?: CLIMode;
@@ -13,6 +14,7 @@ interface CLIArgs {
   coins?: string[];
   market?: string;
   auto?: boolean;
+  provider?: Provider;
   speed?: number;
   dataDir?: string;
   start?: string;
@@ -49,6 +51,14 @@ function normalizeBacktestMode(
   if (normalized === "visual" || normalized === "slow" || normalized === "debug") {
     return "visual";
   }
+  return undefined;
+}
+
+function normalizeProvider(value: string | undefined): Provider | undefined {
+  if (!value) return undefined;
+  const normalized = value.toLowerCase().trim();
+  if (normalized === "polymarket" || normalized === "poly") return "polymarket";
+  if (normalized === "kalshi") return "kalshi";
   return undefined;
 }
 
@@ -101,6 +111,28 @@ function parseArgs(argv: string[]): CLIArgs {
 
     if (raw === "--headless") {
       args.headless = true;
+      continue;
+    }
+
+    if (raw === "--kalshi") {
+      args.provider = "kalshi";
+      continue;
+    }
+
+    if (raw === "--polymarket" || raw === "--poly") {
+      args.provider = "polymarket";
+      continue;
+    }
+
+    if (raw.startsWith("--provider=") || raw.startsWith("--platform=")) {
+      const value = raw.includes("=") ? raw.split("=").slice(1).join("=") : "";
+      args.provider = normalizeProvider(value);
+      continue;
+    }
+
+    if (raw === "--provider" || raw === "--platform") {
+      args.provider = normalizeProvider(argv[i + 1]);
+      i += 1;
       continue;
     }
 
@@ -246,13 +278,15 @@ function printUsage(): void {
     "  --profiles <name1,name2>   (fake-trade)",
     "  --coins <eth,btc,sol,xrp>  (fake-trade)",
     "  --auto                     (fake-trade: select all profiles/coins)",
+    "  --provider <polymarket|kalshi> (fake-trade/watch-market)",
+    "  --kalshi | --polymarket    (provider shortcut)",
     "  --market <keyword|url>     (watch-market)",
     "  --data-dir <path>          (backtest)",
     "  --speed <n|max>            (backtest)",
     "  --backtest-mode <fast|visual> (backtest)",
     "  --fast                    (backtest alias for fast)",
     "  --visual                  (backtest alias for visual)",
-    "  --headless                (backtest: disable dashboard, print logs)",
+    "  --headless                (backtest/fake-trade: disable dashboard UI)",
     "  --start <iso|ms>           (backtest)",
     "  --end <iso|ms>             (backtest)",
     "  --help",
@@ -273,6 +307,9 @@ async function promptMainMenu(): Promise<CLIMode | null> {
 
 const argv = process.argv.slice(2);
 const cliArgs = parseArgs(argv);
+if (cliArgs.provider) {
+  process.env.MARKET_PROVIDER = cliArgs.provider;
+}
 
 const run = async () => {
   if (cliArgs.help) {
@@ -285,6 +322,8 @@ const run = async () => {
       profiles: cliArgs.profiles,
       coins: cliArgs.coins,
       autoSelect: cliArgs.auto,
+      provider: cliArgs.provider,
+      headless: cliArgs.headless,
     });
     return;
   }

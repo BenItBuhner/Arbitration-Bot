@@ -1,6 +1,8 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import type { CoinSymbol } from "./auto-market";
+import type { MarketProvider } from "../providers/provider";
+import type { MarketGroupDefinition } from "./market-groups";
 import type {
   TimedTradeConfig,
   TradeRule,
@@ -20,8 +22,83 @@ export interface ProfileDefinition {
   configs: Map<CoinSymbol, TimedTradeConfig>;
 }
 
+export interface ProviderProfileDefinition {
+  name: string;
+  configsByGroup: Map<string, Map<CoinSymbol, TimedTradeConfig>>;
+}
+
+export interface KalshiCoinSelection {
+  tickers: string[];
+  seriesTickers: string[];
+  eventTickers: string[];
+  marketUrls: string[];
+  autoDiscover: boolean;
+}
+
+export interface ProviderConfigResult {
+  provider: MarketProvider;
+  profiles: ProviderProfileDefinition[];
+  coinOptions: CoinSymbol[];
+  marketGroups: MarketGroupDefinition[];
+  kalshiSelectorsByCoin?: Map<CoinSymbol, KalshiCoinSelection>;
+}
+
 export function stripJsonComments(raw: string): string {
-  return raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  let i = 0;
+  while (i < raw.length) {
+    const char = raw[i];
+    const next = i + 1 < raw.length ? raw[i + 1] : "";
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      result += char;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      // Skip line comment
+      i += 2;
+      while (i < raw.length && raw[i] !== "\n") {
+        i += 1;
+      }
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      // Skip block comment
+      i += 2;
+      while (i < raw.length) {
+        if (raw[i] === "*" && i + 1 < raw.length && raw[i + 1] === "/") {
+          i += 2;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    result += char;
+    i += 1;
+  }
+
+  return result;
 }
 
 export function normalizeCoinKey(key: string): CoinSymbol | null {
@@ -666,12 +743,261 @@ function parseTimedConfig(
   };
 }
 
-export function loadProfilesFromConfig(): {
-  profiles: ProfileDefinition[];
-  coinOptions: CoinSymbol[];
-} {
+function parseConfigFile(): Record<string, unknown> {
   const raw = readFileSync(join(process.cwd(), "config.json"), "utf8");
   const parsed = JSON.parse(stripJsonComments(raw));
+  return parsed as Record<string, unknown>;
+}
+
+function parseMarketGroups(raw: unknown): MarketGroupDefinition[] {
+  if (!Array.isArray(raw)) {
+    return [{ id: "default", match: {} }];
+  }
+
+  const groups: MarketGroupDefinition[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    if (!id) continue;
+    if (seen.has(id)) {
+      throw new Error(`Config error: duplicate marketGroup id ${id}`);
+    }
+    seen.add(id);
+    groups.push({ id, match: (record.match ?? {}) as object });
+  }
+
+  if (groups.length === 0) {
+    groups.push({ id: "default", match: {} });
+  }
+
+  return groups;
+}
+
+function parseCoinList(raw: unknown): CoinSymbol[] {
+  if (!Array.isArray(raw)) return [];
+  const coins: CoinSymbol[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const normalized = normalizeCoinKey(entry);
+    if (normalized && !coins.includes(normalized)) {
+      coins.push(normalized);
+    }
+  }
+  return coins;
+}
+
+function parseKalshiCoins(raw: unknown): {
+  coinOptions: CoinSymbol[];
+  selectorsByCoin: Map<CoinSymbol, KalshiCoinSelection>;
+} {
+  const coinOptions: CoinSymbol[] = [];
+  const selectorsByCoin = new Map<CoinSymbol, KalshiCoinSelection>();
+
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (typeof entry !== "string") continue;
+      const coin = normalizeCoinKey(entry);
+      if (!coin) continue;
+      coinOptions.push(coin);
+      selectorsByCoin.set(coin, {
+        tickers: [],
+        seriesTickers: [],
+        eventTickers: [],
+        marketUrls: [],
+        autoDiscover: true,
+      });
+    }
+    return { coinOptions, selectorsByCoin };
+  }
+
+  if (!raw || typeof raw !== "object") {
+    return { coinOptions, selectorsByCoin };
+  }
+
+  const record = raw as Record<string, unknown>;
+  for (const [coinKey, value] of Object.entries(record)) {
+    const coin = normalizeCoinKey(coinKey);
+    if (!coin) continue;
+    const valueRecord =
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)
+        : null;
+    const tickersRaw = valueRecord?.tickers;
+    const seriesRaw = valueRecord?.seriesTickers;
+    const eventRaw = valueRecord?.eventTickers;
+    const urlRaw = valueRecord?.marketUrls ?? valueRecord?.urls;
+    const autoDiscoverRaw = valueRecord?.autoDiscover;
+
+    const normalizeList = (input: unknown): string[] => {
+      if (!Array.isArray(input)) return [];
+      return input
+        .filter((item) => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+    };
+
+    const tickers = normalizeList(tickersRaw).map((t) => t.toUpperCase());
+    const seriesTickers = normalizeList(seriesRaw).map((t) => t.toUpperCase());
+    const eventTickers = normalizeList(eventRaw).map((t) => t.toUpperCase());
+    const marketUrls = normalizeList(urlRaw);
+    const autoDiscover =
+      typeof autoDiscoverRaw === "boolean" ? autoDiscoverRaw : true;
+
+    selectorsByCoin.set(coin, {
+      tickers,
+      seriesTickers,
+      eventTickers,
+      marketUrls,
+      autoDiscover,
+    });
+    if (!coinOptions.includes(coin)) {
+      coinOptions.push(coin);
+    }
+  }
+
+  return { coinOptions, selectorsByCoin };
+}
+
+function parseProviderProfiles(
+  provider: MarketProvider,
+  raw: unknown,
+): ProviderProfileDefinition[] {
+  if (!raw || typeof raw !== "object") return [];
+  const record = raw as Record<string, unknown>;
+  const profiles: ProviderProfileDefinition[] = [];
+
+  for (const [profileName, profileValue] of Object.entries(record)) {
+    if (!profileValue || typeof profileValue !== "object") continue;
+    const profileRecord = profileValue as Record<string, unknown>;
+    const marketsRaw = profileRecord.markets as Record<string, unknown> | undefined;
+    if (!marketsRaw || typeof marketsRaw !== "object") {
+      throw new Error(
+        `Config error: ${provider} profile ${profileName} missing markets`,
+      );
+    }
+
+    const configsByGroup = new Map<string, Map<CoinSymbol, TimedTradeConfig>>();
+    for (const [groupId, groupValue] of Object.entries(marketsRaw)) {
+      if (!groupValue || typeof groupValue !== "object") continue;
+      const groupRecord = groupValue as Record<string, unknown>;
+      const configs = new Map<CoinSymbol, TimedTradeConfig>();
+      for (const [coinKey, configValue] of Object.entries(groupRecord)) {
+        const coin = normalizeCoinKey(coinKey);
+        if (!coin || !configValue || typeof configValue !== "object") continue;
+        const config = parseTimedConfig(
+          profileName,
+          coinKey,
+          configValue as Record<string, unknown>,
+        );
+        configs.set(coin, config);
+      }
+      if (configs.size > 0) {
+        configsByGroup.set(groupId, configs);
+      }
+    }
+
+    if (configsByGroup.size > 0) {
+      profiles.push({ name: profileName, configsByGroup });
+    }
+  }
+
+  return profiles;
+}
+
+function deriveCoinsFromProfiles(
+  profiles: ProviderProfileDefinition[],
+): CoinSymbol[] {
+  const coinSet = new Set<CoinSymbol>();
+  for (const profile of profiles) {
+    for (const group of profile.configsByGroup.values()) {
+      for (const coin of group.keys()) {
+        coinSet.add(coin);
+      }
+    }
+  }
+  return Array.from(coinSet);
+}
+
+export function resolveProfileConfigForCoin(
+  profile: ProviderProfileDefinition,
+  coin: CoinSymbol,
+  groupId: string | null,
+): TimedTradeConfig | null {
+  if (groupId) {
+    const group = profile.configsByGroup.get(groupId);
+    if (group?.has(coin)) return group.get(coin) || null;
+  }
+  const fallback = profile.configsByGroup.get("default");
+  if (fallback?.has(coin)) return fallback.get(coin) || null;
+
+  for (const group of profile.configsByGroup.values()) {
+    if (group.has(coin)) return group.get(coin) || null;
+  }
+  return null;
+}
+
+export function loadProviderConfig(
+  provider: MarketProvider,
+): ProviderConfigResult {
+  const parsed = parseConfigFile();
+
+  const schemaVersion = parsed.schemaVersion;
+  const providersRaw = parsed.providers;
+
+  if (schemaVersion === 2 || (providersRaw && typeof providersRaw === "object")) {
+    const providers = providersRaw as Record<string, unknown>;
+    const providerRaw = providers?.[provider];
+    if (!providerRaw || typeof providerRaw !== "object") {
+      throw new Error(`Config error: missing provider ${provider}`);
+    }
+    const providerRecord = providerRaw as Record<string, unknown>;
+    const marketGroups = parseMarketGroups(providerRecord.marketGroups);
+    const profiles = parseProviderProfiles(provider, providerRecord.profiles);
+
+    let coinOptions: CoinSymbol[] = [];
+    let kalshiSelectorsByCoin: Map<CoinSymbol, KalshiCoinSelection> | undefined;
+
+    if (provider === "kalshi") {
+      const parsedKalshi = parseKalshiCoins(providerRecord.coins);
+      coinOptions = parsedKalshi.coinOptions;
+      kalshiSelectorsByCoin = parsedKalshi.selectorsByCoin;
+      if (coinOptions.length === 0) {
+        coinOptions = deriveCoinsFromProfiles(profiles);
+      }
+      for (const coin of coinOptions) {
+        if (!kalshiSelectorsByCoin.has(coin)) {
+          kalshiSelectorsByCoin.set(coin, {
+            tickers: [],
+            seriesTickers: [],
+            eventTickers: [],
+            marketUrls: [],
+            autoDiscover: true,
+          });
+        }
+      }
+    } else {
+      coinOptions = parseCoinList(providerRecord.coins);
+      if (coinOptions.length === 0) {
+        coinOptions = deriveCoinsFromProfiles(profiles);
+      }
+    }
+
+    return {
+      provider,
+      profiles,
+      coinOptions,
+      marketGroups,
+      kalshiSelectorsByCoin,
+    };
+  }
+
+  if (provider !== "polymarket") {
+    throw new Error(
+      `Config error: legacy config only supports polymarket (requested ${provider}).`,
+    );
+  }
 
   const profiles: ProfileDefinition[] = [];
   const coinSet = new Set<CoinSymbol>();
@@ -697,5 +1023,39 @@ export function loadProfilesFromConfig(): {
     }
   }
 
-  return { profiles, coinOptions: Array.from(coinSet) };
+  const groupedProfiles: ProviderProfileDefinition[] = profiles.map((profile) => {
+    const configsByGroup = new Map<string, Map<CoinSymbol, TimedTradeConfig>>();
+    configsByGroup.set("default", new Map(profile.configs));
+    return { name: profile.name, configsByGroup };
+  });
+
+  return {
+    provider: "polymarket",
+    profiles: groupedProfiles,
+    coinOptions: Array.from(coinSet),
+    marketGroups: [{ id: "default", match: {} }],
+  };
+}
+
+export function loadProfilesFromConfig(): {
+  profiles: ProfileDefinition[];
+  coinOptions: CoinSymbol[];
+} {
+  const providerConfig = loadProviderConfig("polymarket");
+  const profiles: ProfileDefinition[] = [];
+
+  for (const profile of providerConfig.profiles) {
+    const configs = new Map<CoinSymbol, TimedTradeConfig>();
+    for (const coin of providerConfig.coinOptions) {
+      const config = resolveProfileConfigForCoin(profile, coin, "default");
+      if (config) {
+        configs.set(coin, config);
+      }
+    }
+    if (configs.size > 0) {
+      profiles.push({ name: profile.name, configs });
+    }
+  }
+
+  return { profiles, coinOptions: providerConfig.coinOptions };
 }

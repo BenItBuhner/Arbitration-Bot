@@ -88,7 +88,7 @@ export function extractSlugFromUrl(url: string): string {
       pathParts.length >= 2 &&
       (pathParts[0] === "event" || pathParts[0] === "market")
     ) {
-      return pathParts[1];
+      return pathParts[1] ?? trimmed;
     }
     // Fallback to last segment if it's a non-standard Polymarket link
     return pathParts[pathParts.length - 1] || trimmed;
@@ -442,7 +442,10 @@ export async function quickMarketLookup(
       // and we didn't find an exact slug match above, we should be skeptical.
       if (!isSpecificIdentifier) {
         // If it was just a general word like "bitcoin", take the top search result.
-        market = search.markets[0];
+        const first = search.markets[0];
+        if (first) {
+          market = first;
+        }
       }
     }
   }

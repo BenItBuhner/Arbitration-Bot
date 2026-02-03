@@ -143,7 +143,10 @@ function pickClosestEvent(
   }
 
   if (filtered.length > 0) {
-    return { event: filtered[0].event, startMs: filtered[0].startMs };
+    const first = filtered[0];
+    if (first) {
+      return { event: first.event, startMs: first.startMs };
+    }
   }
 
   return null;

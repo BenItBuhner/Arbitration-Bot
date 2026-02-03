@@ -129,7 +129,7 @@ export class PriceGraph {
     const normalized = new Array(count);
     const heightMinus1 = this.height - 1;
     for (let i = 0; i < count; i++) {
-      const p = this.prices[i];
+      const p = this.prices[i] ?? min;
       const value = Number.isFinite(p) ? p : min;
       normalized[i] = Math.floor(((value - min) / range) * heightMinus1);
     }

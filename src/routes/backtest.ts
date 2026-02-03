@@ -368,8 +368,11 @@ function parseDateInput(raw: string): number | null {
   // Check for YYYY-MM-DD HH:mm(:ss) format (space-separated, treat as UTC)
   const spaceTimeMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)$/);
   if (spaceTimeMatch) {
+    const datePart = spaceTimeMatch[1];
+    const timePart = spaceTimeMatch[2];
+    if (!datePart || !timePart) return null;
     // Convert "YYYY-MM-DD HH:mm:ss" to ISO format with Z suffix for UTC
-    const isoString = `${spaceTimeMatch[1]}T${spaceTimeMatch[2]}${spaceTimeMatch[2].length === 5 ? ":00" : ""}Z`;
+    const isoString = `${datePart}T${timePart}${timePart.length === 5 ? ":00" : ""}Z`;
     const parsed = Date.parse(isoString);
     if (!Number.isNaN(parsed)) return parsed;
   }
@@ -547,8 +550,8 @@ function resolveSelection(
     }
   }
 
-  const coinsToSelect =
-    coinOptions.length > 0 ? coinOptions : ["eth", "btc", "sol", "xrp"];
+  const fallbackCoins: CoinSymbol[] = ["eth", "btc", "sol", "xrp"];
+  const coinsToSelect = coinOptions.length > 0 ? coinOptions : fallbackCoins;
   let selectedCoins: CoinSymbol[] | null = null;
 
   if (options.coins && options.coins.length > 0) {
@@ -1544,7 +1547,11 @@ export async function backtestRoute(
   const perfLogEnabled = parsePerfLogEnabled();
   const regressionLogEnabled = parseRegressionLogEnabled();
 
-  let fetchResult: FetchBacktestDataResult = { truncatedMarkets: [], missingAfterRetries: [] };
+  let fetchResult: FetchBacktestDataResult = {
+    truncatedMarkets: [],
+    missingAfterRetries: [],
+    cacheHits: { markets: 0, trades: 0, crypto: 0 },
+  };
   try {
     const fetchLogger = new RunLogger(join(runDir, "fetch.log"));
     const fetchLog = createCliLogger(fetchLogger, "fetch");

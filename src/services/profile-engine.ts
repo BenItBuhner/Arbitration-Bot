@@ -263,6 +263,10 @@ export interface ProfileEngineOptions {
   decisionLatencyMs?: number;
   crossDebug?: boolean;
   crossAllowNoFlip?: boolean;
+  configResolver?: (
+    coin: CoinSymbol,
+    snapshot: MarketSnapshot,
+  ) => TimedTradeConfig | null;
 }
 
 export interface ProfileSummary {
@@ -281,7 +285,13 @@ export interface ProfileMarketView {
   timeLeftSec: number | null;
   priceToBeat: number;
   referencePrice: number;
-  referenceSource: "price_to_beat" | "historical" | "html" | "missing";
+  referenceSource:
+    | "price_to_beat"
+    | "historical"
+    | "html"
+    | "kalshi_underlying"
+    | "kalshi_html"
+    | "missing";
   cryptoPrice: number;
   priceDiff: number | null;
   favoredOutcome: string | null;
@@ -328,6 +338,10 @@ export class ProfileEngine {
   private crossDebug: boolean;
   private crossAllowNoFlip: boolean;
   private decisionLatencyMs: number | null;
+  private configResolver?: (
+    coin: CoinSymbol,
+    snapshot: MarketSnapshot,
+  ) => TimedTradeConfig | null;
   private signalStats: SignalStats = {
     samples: 0,
     spreadSum: 0,
@@ -364,6 +378,7 @@ export class ProfileEngine {
       typeof rawLatency === "number" && Number.isFinite(rawLatency)
         ? Math.max(0, Math.floor(rawLatency))
         : null;
+    this.configResolver = options.configResolver;
     for (const coin of configs.keys()) {
       this.coinStates.set(coin, this.createCoinState());
     }
@@ -439,7 +454,7 @@ export class ProfileEngine {
 
     let openExposure = 0;
 
-    for (const [coin, config] of this.configs.entries()) {
+    for (const coin of this.coinStates.keys()) {
       const coinState = this.coinStates.get(coin);
       if (coinState?.position) {
         openExposure += coinState.position.cost;
@@ -451,6 +466,8 @@ export class ProfileEngine {
 
       const snapshot = snapshots.get(coin);
       if (!snapshot) continue;
+      const config = this.resolveConfig(coin, snapshot);
+      if (!config) continue;
 
       const previous = this.lastSnapshots.get(coin);
       if (previous && previous.slug !== snapshot.slug) {
@@ -497,17 +514,18 @@ export class ProfileEngine {
     for (const [coin, snapshot] of this.lastSnapshots.entries()) {
       const state = this.coinStates.get(coin);
       const lastResult = this.lastResultByCoin.get(coin) || null;
-      const config = this.configs.get(coin) || null;
+      const config = this.resolveConfig(coin, snapshot);
 
       const threshold =
         snapshot.priceToBeat > 0
           ? snapshot.priceToBeat
           : snapshot.referencePrice;
-      const hasPrice = threshold > 0 && snapshot.cryptoPrice > 0;
+      const priceValue = this.resolveSnapshotPrice(snapshot);
+      const hasPrice = threshold > 0 && priceValue > 0;
       const priceDiff = hasPrice
-        ? Math.abs(snapshot.cryptoPrice - threshold)
+        ? Math.abs(priceValue - threshold)
         : null;
-      const favoredUp = hasPrice ? snapshot.cryptoPrice >= threshold : null;
+      const favoredUp = hasPrice ? priceValue >= threshold : null;
       const favoredOutcome = hasPrice
         ? favoredUp
           ? snapshot.upOutcome
@@ -585,6 +603,16 @@ export class ProfileEngine {
     }
 
     return views;
+  }
+
+  private resolveConfig(
+    coin: CoinSymbol,
+    snapshot: MarketSnapshot,
+  ): TimedTradeConfig | null {
+    const base = this.configs.get(coin) ?? null;
+    if (!this.configResolver) return base;
+    const resolved = this.configResolver(coin, snapshot);
+    return resolved ?? base;
   }
 
   private createCoinState(): CoinTradeState {
@@ -667,9 +695,10 @@ export class ProfileEngine {
       snapshot.priceToBeat > 0
         ? snapshot.priceToBeat
         : snapshot.referencePrice;
-    const hasPrice = threshold > 0 && snapshot.cryptoPrice > 0;
+    const priceValue = this.resolveSnapshotPrice(snapshot);
+    const hasPrice = threshold > 0 && priceValue > 0;
     const priceDiff = hasPrice
-      ? Math.abs(snapshot.cryptoPrice - threshold)
+      ? Math.abs(priceValue - threshold)
       : null;
     const timeOk =
       snapshot.timeLeftSec !== null &&
@@ -683,6 +712,7 @@ export class ProfileEngine {
     let lossSizeMultiplier = 1;
     if (
       lossEnabled &&
+      lossConfig &&
       coinState.lossStreak >= (lossConfig.streakThreshold ?? 2)
     ) {
       lossDiffMultiplier = lossConfig.minDiffMultiplier ?? 1.2;
@@ -710,7 +740,7 @@ export class ProfileEngine {
       effectiveRule !== null &&
       priceDiff >= effectiveRule.minimumPriceDifference;
 
-    const favoredUp = hasPrice ? snapshot.cryptoPrice >= threshold : null;
+    const favoredUp = hasPrice ? priceValue >= threshold : null;
     const favoredTokenId =
       favoredUp === null
         ? null
@@ -1048,6 +1078,7 @@ export class ProfileEngine {
     let lossSizeMultiplier = 1;
     if (
       lossEnabled &&
+      lossConfig &&
       state.lossStreak >= (lossConfig.streakThreshold ?? 2)
     ) {
       lossDiffMultiplier = lossConfig.minDiffMultiplier ?? 1.2;
@@ -1069,11 +1100,12 @@ export class ProfileEngine {
       snapshot.priceToBeat > 0
         ? snapshot.priceToBeat
         : snapshot.referencePrice;
-    const hasPrice = threshold > 0 && snapshot.cryptoPrice > 0;
+    const priceValue = this.resolveSnapshotPrice(snapshot);
+    const hasPrice = threshold > 0 && priceValue > 0;
     const priceDiff = hasPrice
-      ? Math.abs(snapshot.cryptoPrice - threshold)
+      ? Math.abs(priceValue - threshold)
       : null;
-    const favoredUp = hasPrice ? snapshot.cryptoPrice >= threshold : null;
+    const favoredUp = hasPrice ? priceValue >= threshold : null;
     const signals = this.advancedSignals ? snapshot.signals : null;
     const tokenSignal =
       this.advancedSignals && signals
@@ -1177,11 +1209,12 @@ export class ProfileEngine {
       snapshot.priceToBeat > 0
         ? snapshot.priceToBeat
         : snapshot.referencePrice;
-    const hasPrice = threshold > 0 && snapshot.cryptoPrice > 0;
+    const priceValue = this.resolveSnapshotPrice(snapshot);
+    const hasPrice = threshold > 0 && priceValue > 0;
     if (!hasPrice) return;
 
-    const priceDiff = Math.abs(snapshot.cryptoPrice - threshold);
-    const favoredUp = snapshot.cryptoPrice >= threshold;
+    const priceDiff = Math.abs(priceValue - threshold);
+    const favoredUp = priceValue >= threshold;
     const favoredOutcome = favoredUp ? snapshot.upOutcome : snapshot.downOutcome;
 
     const shouldFlip = favoredOutcome !== state.position.outcome;
@@ -1849,6 +1882,18 @@ export class ProfileEngine {
     return total;
   }
 
+  private resolveSnapshotPrice(snapshot: MarketSnapshot): number {
+    if (
+      snapshot.provider === "kalshi" &&
+      snapshot.kalshiUnderlyingValue !== null &&
+      snapshot.kalshiUnderlyingValue !== undefined &&
+      snapshot.kalshiUnderlyingValue > 0
+    ) {
+      return snapshot.kalshiUnderlyingValue;
+    }
+    return snapshot.cryptoPrice;
+  }
+
   private resolveMaxSpend(
     rule: TradeRule,
     snapshot: MarketSnapshot,
@@ -1880,10 +1925,9 @@ export class ProfileEngine {
         snapshot.priceToBeat > 0
           ? snapshot.priceToBeat
           : snapshot.referencePrice;
-      const hasPrice = threshold > 0 && snapshot.cryptoPrice > 0;
-      const priceDiff = hasPrice
-        ? Math.abs(snapshot.cryptoPrice - threshold)
-        : null;
+      const priceValue = this.resolveSnapshotPrice(snapshot);
+      const hasPrice = threshold > 0 && priceValue > 0;
+      const priceDiff = hasPrice ? Math.abs(priceValue - threshold) : null;
       if (priceDiff !== null) {
         const denom = Math.max(rule.minimumPriceDifference, 1);
         factor = clamp(priceDiff / denom, 0.5, 2);
@@ -2282,7 +2326,8 @@ export class ProfileEngine {
       return;
     }
 
-    const outcomeUp = snapshot.cryptoPrice >= threshold;
+    const priceValue = this.resolveSnapshotPrice(snapshot);
+    const outcomeUp = priceValue >= threshold;
     const resolvedOutcome = outcomeUp ? snapshot.upOutcome : snapshot.downOutcome;
 
     let netPnl = state.realizedPnl;

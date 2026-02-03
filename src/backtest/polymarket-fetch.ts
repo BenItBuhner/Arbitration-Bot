@@ -338,7 +338,7 @@ function extractMakerOrders(
       parseNumberValue(item.matchedAmount) ??
       parseNumberValue(item.size) ??
       parseNumberValue(item.amount);
-    if (!Number.isFinite(price) || !Number.isFinite(size)) continue;
+    if (price === null || size === null) continue;
 
     const side = normalizeSideValue(item.side) ?? fallbackSide;
     if (!side) continue;
@@ -433,9 +433,9 @@ function normalizeTrade(
 
   if (!timestamp || !tokenId) return null;
 
-  const price = typeof priceRaw === "string" ? Number(priceRaw) : priceRaw;
-  const size = typeof sizeRaw === "string" ? Number(sizeRaw) : sizeRaw;
-  if (!Number.isFinite(price) || !Number.isFinite(size)) return null;
+  const priceValue = Number(priceRaw);
+  const sizeValue = Number(sizeRaw);
+  if (!Number.isFinite(priceValue) || !Number.isFinite(sizeValue)) return null;
 
   const side = extractTradeSide(raw);
   const tradeId =
@@ -451,9 +451,10 @@ function normalizeTrade(
     (raw.bucket_index as number | string | undefined) ??
     (raw.bucketIndex as number | string | undefined);
   const bucketIndexValue = parseNumberValue(bucketIndexRaw);
-  const bucketIndex = Number.isFinite(bucketIndexValue)
-    ? Math.max(0, Math.floor(bucketIndexValue))
-    : undefined;
+  const bucketIndex =
+    bucketIndexValue === null
+      ? undefined
+      : Math.max(0, Math.floor(bucketIndexValue));
 
   const makerOrders = extractMakerOrders(
     raw,
@@ -466,8 +467,8 @@ function normalizeTrade(
   const trade: BacktestTradeEvent = {
     timestamp,
     tokenId,
-    price,
-    size,
+    price: priceValue,
+    size: sizeValue,
   };
   if (side) {
     trade.side = side;
@@ -821,10 +822,13 @@ async function fetchDataApiTradesPage(
   while (true) {
     const response = await fetchWithTimeout(url.toString(), TRADES_TIMEOUT_MS);
     if (response.ok) {
-      const data = await response.json();
+      const data = (await response.json()) as unknown;
       if (Array.isArray(data)) return data;
-      if (data && typeof data === "object" && Array.isArray(data.trades)) {
-        return data.trades;
+      if (data && typeof data === "object") {
+        const record = data as Record<string, unknown>;
+        if (Array.isArray(record.trades)) {
+          return record.trades as unknown[];
+        }
       }
       return [];
     }

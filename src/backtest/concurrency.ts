@@ -17,7 +17,9 @@ export async function mapWithConcurrency<T, R>(
       nextIndex += 1;
       if (index >= items.length) return;
 
-      results[index] = await worker(items[index], index);
+      const item = items[index];
+      if (item === undefined) return;
+      results[index] = await worker(item, index);
       completed += 1;
       if (onProgress) {
         onProgress(completed, items.length);

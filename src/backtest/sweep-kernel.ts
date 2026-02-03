@@ -781,7 +781,7 @@ export class SweepKernel {
           if ((this.crossModeEnabled[p] ?? 0) === 1) {
             const split = Number.isNaN(this.crossModeSplitSec[p] ?? Number.NaN)
               ? (this.crossTradeAllowedTimeLeft[p] ?? 0) / 2
-              : this.crossModeSplitSec[p];
+              : this.crossModeSplitSec[p] ?? 0;
             const usePrecision = timeLeftSec > split;
             const minDiffMult = usePrecision
               ? this.crossPrecisionMinDiffMult[p] ?? 1

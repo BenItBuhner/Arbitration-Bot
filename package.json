@@ -10,7 +10,8 @@
     "high-volume": "bun run exp/example-usage.ts high-volume",
     "trading-bot": "bun run exp/example-usage.ts trading-bot",
     "alert": "bun run exp/example-usage.ts alert",
-    "multi": "bun run exp/example-usage.ts multi"
+    "multi": "bun run exp/example-usage.ts multi",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -22,6 +23,7 @@
   "dependencies": {
     "@ethersproject/wallet": "^5.8.0",
     "@polymarket/clob-client": "^5.2.1",
+    "kalshi-typescript": "latest",
     "prompts": "latest",
     "unzipper": "^0.12.3"
   }

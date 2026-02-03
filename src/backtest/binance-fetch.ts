@@ -423,7 +423,7 @@ async function fetchAggTrades(
           "CRYPTO_HISTORY_FALLBACK_PROVIDER=binance_vision) to use data archives.";
         throw new BinanceRequestError(message, {
           status,
-          retryAfterMs,
+          retryAfterMs: retryAfterMs ?? undefined,
           isBlocked: true,
           url: url.toString(),
         });
@@ -433,7 +433,7 @@ async function fetchAggTrades(
         const message = `Binance aggTrades rate limit exceeded (${details}).`;
         throw new BinanceRequestError(message, {
           status,
-          retryAfterMs,
+          retryAfterMs: retryAfterMs ?? undefined,
           isRateLimited: true,
           url: url.toString(),
         });
@@ -442,7 +442,7 @@ async function fetchAggTrades(
       const message = `Binance aggTrades failed (${details}).`;
       throw new BinanceRequestError(message, {
         status,
-        retryAfterMs,
+        retryAfterMs: retryAfterMs ?? undefined,
         url: url.toString(),
       });
     } catch (error) {

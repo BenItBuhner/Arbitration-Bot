@@ -32,7 +32,7 @@ function extractNextData(html: string): unknown | null {
   if (scriptStart === -1 || scriptEnd === -1) return null;
   const script = html.slice(scriptStart, scriptEnd);
   const match = script.match(/<script[^>]*>([\s\S]*)/);
-  if (!match) return null;
+  if (!match || !match[1]) return null;
   try {
     return JSON.parse(match[1]);
   } catch {

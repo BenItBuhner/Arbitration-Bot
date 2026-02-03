@@ -45,7 +45,13 @@ export interface SignalInput {
   bestAsk: Map<string, number>;
   priceHistory: number[];
   cryptoPriceTimestamp: number;
-  referenceSource: "price_to_beat" | "historical" | "html" | "missing";
+  referenceSource:
+    | "price_to_beat"
+    | "historical"
+    | "html"
+    | "kalshi_underlying"
+    | "kalshi_html"
+    | "missing";
   priceToBeat: number;
   referencePrice: number;
 }
@@ -242,13 +248,17 @@ export function computeSignals(
       : null;
 
   const referenceQuality =
-    input.priceToBeat > 0
+    input.referenceSource === "kalshi_underlying"
       ? 1
-      : input.referenceSource === "html"
-        ? 1
-        : input.referenceSource === "historical"
-          ? 0.6
-          : 0;
+      : input.referenceSource === "kalshi_html"
+        ? 0.8
+        : input.priceToBeat > 0
+          ? 1
+          : input.referenceSource === "html"
+            ? 1
+            : input.referenceSource === "historical"
+              ? 0.6
+              : 0;
 
   return {
     tokenSignals,

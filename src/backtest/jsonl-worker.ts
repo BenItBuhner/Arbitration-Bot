@@ -1,5 +1,7 @@
 import { readFileSync } from "fs";
 
+declare const self: any;
+
 type JsonlWorkerRequest = {
   id: number;
   filePath: string;

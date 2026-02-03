@@ -17,6 +17,7 @@ import { fetchHistoricalCryptoPrice } from "./crypto-service";
 import { fetchPolymarketHtmlReferencePrice } from "./polymarket-html";
 import { RunLogger } from "./run-logger";
 import { computeSignals } from "./market-signals";
+import type { MarketProvider } from "../providers/provider";
 
 const MARKET_DURATION_MS = 15 * 60 * 1000;
 const BOOK_STALE_MS = 10000;
@@ -67,6 +68,7 @@ const HTML_REF_MATCH_TOLERANCE_MS = parseEnvNumber(
   30000,
   0,
 );
+const HTML_REF_ENABLED = parseEnvFlag("PM_HTML_REF_ENABLED", false);
 
 const ENABLE_LIVE_SIGNALS = parseEnvFlag("LIVE_SIGNAL_PREP", true);
 
@@ -105,16 +107,30 @@ export interface OrderBookSnapshot {
 }
 
 export interface MarketSnapshot {
+  provider?: MarketProvider;
   coin: CoinSymbol;
   symbol: string;
   marketName: string;
   slug: string;
+  seriesSlug?: string | null;
+  marketTicker?: string | null;
+  eventTicker?: string | null;
   timeLeftSec: number | null;
   priceToBeat: number;
   referencePrice: number;
-  referenceSource: "price_to_beat" | "historical" | "html" | "missing";
+  referenceSource:
+    | "price_to_beat"
+    | "historical"
+    | "html"
+    | "kalshi_underlying"
+    | "kalshi_html"
+    | "missing";
   cryptoPrice: number;
   cryptoPriceTimestamp: number;
+  kalshiUnderlyingValue?: number | null;
+  kalshiUnderlyingTs?: number | null;
+  kalshiLastPrice?: number | null;
+  kalshiLastPriceTs?: number | null;
   dataStatus: "unknown" | "healthy" | "stale";
   lastBookUpdateMs: number;
   upOutcome: string;
@@ -280,6 +296,7 @@ export class MarketDataHub {
     const coinMeta = COIN_CONFIG[coin];
 
     const state: MarketDataState = {
+      provider: "polymarket",
       coin,
       symbol: coinMeta.symbol,
       market,
@@ -288,8 +305,10 @@ export class MarketDataHub {
       marketEndMs,
       marketName: market.question || market.slug,
       slug: market.slug,
+      seriesSlug: market.seriesSlug ?? null,
+      marketTicker: null,
+      eventTicker: null,
       timeLeftSec: this.getTimeLeftSec(marketEndMs),
-      outcomes,
       upOutcome: outcomes[upIndex] || "Up",
       downOutcome: outcomes[downIndex] || "Down",
       upTokenId,
@@ -586,6 +605,7 @@ export class MarketDataHub {
   }
 
   private maybeRefreshHtmlReference(state: MarketDataState, now: number): void {
+    if (!HTML_REF_ENABLED) return;
     if (!state.marketStartMs || !state.marketEndMs) return;
     if (state.marketStartMs > now) return;
     if (state.htmlReferencePending) return;
@@ -609,6 +629,7 @@ export class MarketDataHub {
   }
 
   private tryFetchHtmlReference(state: MarketDataState): void {
+    if (!HTML_REF_ENABLED) return;
     if (!state.marketStartMs || !state.marketEndMs) return;
     if (state.htmlReferencePending) return;
 

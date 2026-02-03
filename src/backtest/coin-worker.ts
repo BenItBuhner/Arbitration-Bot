@@ -8,6 +8,8 @@ import { BacktestHub } from "./backtest-hub";
 import { BacktestRunner } from "./backtest-runner";
 import { loadBacktestData } from "../routes/backtest";
 
+declare const self: any;
+
 type CoinWorkerRequest = {
   coin: CoinSymbol;
   dataDir: string;
