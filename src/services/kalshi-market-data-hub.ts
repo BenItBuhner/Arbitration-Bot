@@ -1,6 +1,7 @@
 import { KalshiClient } from "../clients/kalshi/kalshi-client";
 import { KalshiMarketWS, type KalshiTickerUpdate } from "../clients/kalshi/kalshi-ws";
 import { CryptoWS, type CryptoPricePayload } from "../clients/crypto-ws";
+import { KalshiPriceFeed } from "./kalshi-price-feed";
 import { computeSignals, type SignalSnapshot, type TradeLike } from "./market-signals";
 import { RunLogger } from "./run-logger";
 import type { CoinSymbol } from "./auto-market";
@@ -65,6 +66,7 @@ interface KalshiMarketState extends MarketSnapshot {
   lastHtmlReferenceAttemptMs: number;
   refRetryAttempts: number;
   lastRefRetryMs: number;
+  priceFeed: KalshiPriceFeed | null;
 }
 
 interface KalshiMarketCandidate {
@@ -334,6 +336,7 @@ export class KalshiMarketDataHub {
   private states: Map<CoinSymbol, KalshiMarketState> = new Map();
   private tickerToCoin: Map<string, CoinSymbol> = new Map();
   private evaluationTimer: NodeJS.Timeout | null = null;
+  private kalshiFeedFallbackLogged = new Set<CoinSymbol>();
 
   constructor(
     logger: RunLogger,
@@ -371,6 +374,9 @@ export class KalshiMarketDataHub {
       clearInterval(this.evaluationTimer);
       this.evaluationTimer = null;
     }
+    for (const state of this.states.values()) {
+      state.priceFeed?.stop();
+    }
     if (this.kalshiWs) {
       this.kalshiWs.disconnect();
       this.kalshiWs = null;
@@ -381,6 +387,7 @@ export class KalshiMarketDataHub {
     }
     this.states.clear();
     this.tickerToCoin.clear();
+    this.kalshiFeedFallbackLogged.clear();
   }
 
   getSnapshots(): Map<CoinSymbol, MarketSnapshot> {
@@ -743,6 +750,9 @@ export class KalshiMarketDataHub {
       bestBid: new Map(),
       bestAsk: new Map(),
       priceHistory: [],
+      kalshiMarketPrice: null,
+      kalshiMarketPriceTs: null,
+      kalshiMarketPriceHistory: [],
       signals: undefined,
       closeTimeMs: closeTime,
       lastCryptoUpdateMs: 0,
@@ -756,7 +766,16 @@ export class KalshiMarketDataHub {
       lastHtmlReferenceAttemptMs: 0,
       refRetryAttempts: 0,
       lastRefRetryMs: 0,
+      priceFeed: null,
     };
+
+    const feed = new KalshiPriceFeed(
+      this.kalshiConfig,
+      selectedTicker,
+      seriesTicker ?? deriveSeriesTickerFromMarket(selectedTicker) ?? "",
+    );
+    feed.start();
+    state.priceFeed = feed;
 
     this.logger.log(
       `DATA: selected Kalshi ${coin.toUpperCase()} market ${selectedTicker}`,
@@ -923,8 +942,18 @@ export class KalshiMarketDataHub {
     if (!state) return;
 
     if (update.price !== null) {
+      const ts = update.timestampMs ?? Date.now();
       state.kalshiLastPrice = update.price;
-      state.kalshiLastPriceTs = update.timestampMs ?? Date.now();
+      state.kalshiLastPriceTs = ts;
+      state.kalshiMarketPrice = update.price;
+      state.kalshiMarketPriceTs = ts;
+      if (!state.kalshiMarketPriceHistory) {
+        state.kalshiMarketPriceHistory = [];
+      }
+      state.kalshiMarketPriceHistory.push(update.price);
+      if (state.kalshiMarketPriceHistory.length > 180) {
+        state.kalshiMarketPriceHistory.shift();
+      }
     }
     if (update.yesBid !== null) {
       state.bestBid.set("YES", update.yesBid);
@@ -1067,7 +1096,32 @@ export class KalshiMarketDataHub {
 
   private tick(): void {
     const now = Date.now();
+    const PRICE_HISTORY_LIMIT = 180;
+    const KALSHI_FEED_GRACE_MS = 90_000;
     for (const state of this.states.values()) {
+      if (state.priceFeed) {
+        const snap = state.priceFeed.getSnapshot();
+        if (snap) {
+          state.kalshiMarketPrice = snap.price;
+          state.kalshiMarketPriceTs = snap.ts;
+          if (snap.history.length > 0) {
+            state.kalshiMarketPriceHistory = snap.history
+              .map((p) => p.price)
+              .slice(-PRICE_HISTORY_LIMIT);
+          }
+        }
+        if (
+          now - state.selectedAtMs > KALSHI_FEED_GRACE_MS &&
+          (!state.kalshiMarketPriceHistory || state.kalshiMarketPriceHistory.length === 0) &&
+          !this.kalshiFeedFallbackLogged.has(state.coin)
+        ) {
+          this.kalshiFeedFallbackLogged.add(state.coin);
+          this.logger.log(
+            `DATA: Kalshi price feed has no history for ${state.coin.toUpperCase()} (${state.marketTicker}); UI will use crypto WS fallback.`,
+            "WARN",
+          );
+        }
+      }
       this.maybeRefreshKalshiReference(state, now);
       this.maybeRefreshHtmlReference(state, now);
       state.timeLeftSec = state.closeTimeMs ? (state.closeTimeMs - now) / 1000 : null;
@@ -1145,6 +1199,7 @@ export class KalshiMarketDataHub {
 
     const current = this.states.get(coin);
     if (current) {
+      current.priceFeed?.stop();
       this.tickerToCoin.delete(current.marketTicker);
     }
 

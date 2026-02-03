@@ -17,24 +17,27 @@ export interface KalshiMarket {
   strike_price?: number | string | null;
   strike_price_decimal?: number | string | null;
   strike_price_cents?: number | string | null;
-  strike?: number | string | null;
   strike_price_dollars?: number | string | { value?: string; display_value?: string } | null;
   strike_type?: string;
   floor_strike?: number | string | null;
   cap_strike?: number | string | null;
   lower_strike?: number | string | null;
   upper_strike?: number | string | null;
-  strike?: {
-    strike_type?: string;
-    floor_strike?: number | string | null;
-    cap_strike?: number | string | null;
-    lower_strike?: number | string | null;
-    upper_strike?: number | string | null;
-    strike_price?: number | string | null;
-    strike_price_decimal?: number | string | null;
-    strike_price_cents?: number | string | null;
-    strike_price_dollars?: number | string | { value?: string; display_value?: string } | null;
-  } | null;
+  strike?:
+    | number
+    | string
+    | {
+        strike_type?: string;
+        floor_strike?: number | string | null;
+        cap_strike?: number | string | null;
+        lower_strike?: number | string | null;
+        upper_strike?: number | string | null;
+        strike_price?: number | string | null;
+        strike_price_decimal?: number | string | null;
+        strike_price_cents?: number | string | null;
+        strike_price_dollars?: number | string | { value?: string; display_value?: string } | null;
+      }
+    | null;
   underlying_value?: number | string | null;
   underlying_value_ts?: number | string | null;
   last_price?: number | string | null;

@@ -208,9 +208,24 @@ export class BacktestRunner {
         activeProfile && activeProfile.markets.length > 0
           ? activeProfile.markets[0]?.coin ?? null
           : this.options.selectedCoins[0] || null;
-      const activeCoinHistory = activeCoin
-        ? snapshots.get(activeCoin)?.priceHistory || []
-        : [];
+      const snap = activeCoin ? snapshots.get(activeCoin) : undefined;
+      const isKalshi = snap?.provider === "kalshi";
+      const usingMarketHistory = Boolean(
+        isKalshi && snap?.kalshiMarketPriceHistory?.length,
+      );
+      const activeCoinHistory =
+        activeCoin && snap
+          ? usingMarketHistory
+            ? snap.kalshiMarketPriceHistory
+            : snap.priceHistory || []
+          : [];
+      const activeCoinPriceLabel = isKalshi
+        ? usingMarketHistory
+          ? "Market Price (odds)"
+          : "Spot Price (fallback)"
+        : activeCoin
+          ? `Spot Price (${activeCoin.toUpperCase()})`
+          : "Spot Price";
 
       this.dashboard.update({
         runId: this.options.runId,
@@ -218,7 +233,8 @@ export class BacktestRunner {
         activeProfileIndex: activeIndex,
         profiles: profileViews,
         activeCoin,
-        activeCoinPriceHistory: activeCoinHistory,
+        activeCoinPriceHistory: activeCoinHistory ?? [],
+        activeCoinPriceLabel,
       });
       return;
     }
@@ -277,9 +293,24 @@ export class BacktestRunner {
       activeProfile && activeProfile.markets.length > 0
         ? activeProfile.markets[0]?.coin ?? null
         : this.options.selectedCoins[0] || null;
-    const activeCoinHistory = activeCoin
-      ? snapshots.get(activeCoin)?.priceHistory || []
-      : [];
+    const snap = activeCoin ? snapshots.get(activeCoin) : undefined;
+    const isKalshi = snap?.provider === "kalshi";
+    const usingMarketHistory = Boolean(
+      isKalshi && snap?.kalshiMarketPriceHistory?.length,
+    );
+    const activeCoinHistory =
+      activeCoin && snap
+        ? usingMarketHistory
+          ? snap.kalshiMarketPriceHistory
+          : snap.priceHistory || []
+        : [];
+    const activeCoinPriceLabel = isKalshi
+      ? usingMarketHistory
+        ? "Market Price (odds)"
+        : "Spot Price (fallback)"
+      : activeCoin
+        ? `Spot Price (${activeCoin.toUpperCase()})`
+        : "Spot Price";
 
     this.dashboard.update({
       runId: this.options.runId,
@@ -287,7 +318,8 @@ export class BacktestRunner {
       activeProfileIndex: activeIndex,
       profiles: profileViews,
       activeCoin,
-      activeCoinPriceHistory: activeCoinHistory,
+      activeCoinPriceHistory: activeCoinHistory ?? [],
+      activeCoinPriceLabel,
     });
   }
 

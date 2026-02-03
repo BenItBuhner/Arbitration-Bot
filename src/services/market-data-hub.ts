@@ -131,6 +131,9 @@ export interface MarketSnapshot {
   kalshiUnderlyingTs?: number | null;
   kalshiLastPrice?: number | null;
   kalshiLastPriceTs?: number | null;
+  kalshiMarketPrice?: number | null;
+  kalshiMarketPriceTs?: number | null;
+  kalshiMarketPriceHistory?: number[];
   dataStatus: "unknown" | "healthy" | "stale";
   lastBookUpdateMs: number;
   upOutcome: string;

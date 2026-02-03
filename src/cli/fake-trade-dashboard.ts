@@ -120,7 +120,7 @@ export class FakeTradeDashboard {
 
       output += `${colors.bright}${market.coin.toUpperCase()}${colors.reset} ${market.marketName}\n`;
       output += `${colors.dim}Slug: ${market.marketSlug}${colors.reset}\n`;
-      output += `Time Left: ${timeLeft} | Ref: ${priceToBeat} | Price: ${currentPrice} | Diff: ${diff}\n`;
+      output += `Time Left: ${timeLeft} | Ref: ${priceToBeat} | Spot: ${currentPrice} | Diff: ${diff}\n`;
       output += `Favored: ${favored} | Best Bid: ${bid} | Best Ask: ${ask}\n`;
 
       const bidTotal =

@@ -21,6 +21,7 @@ export interface ProfileDashboardState {
   profiles: ProfileViewState[];
   activeCoin: CoinSymbol | null;
   activeCoinPriceHistory: number[];
+  activeCoinPriceLabel?: string;
   useCandleGraph?: boolean;
 }
 
@@ -155,13 +156,15 @@ export class ProfileDashboard {
       priceGraph.addPrices(this.state.activeCoinPriceHistory);
     }
 
-    const coinLabel = this.state.activeCoin
-      ? this.state.activeCoin.toUpperCase()
-      : "N/A";
+    const priceGraphTitle =
+      this.state.activeCoinPriceLabel ??
+      (this.state.activeCoin
+        ? `Spot Price (${this.state.activeCoin.toUpperCase()})`
+        : "Spot Price");
 
     let output = `${colors.bright}PnL History${colors.reset}\n`;
     output += pnlGraph.render();
-    output += `\n${colors.bright}Price History (${coinLabel})${colors.reset}\n`;
+    output += `\n${colors.bright}${priceGraphTitle}${colors.reset}\n`;
     output += priceGraph.render();
     output += "\n";
     return output;
@@ -189,10 +192,17 @@ export class ProfileDashboard {
         : market.referenceSource === "missing"
           ? "pending"
           : market.referenceSource.replace(/_/g, " ");
-    const currentPrice =
+    const spotPrice =
       market.cryptoPrice > 0
         ? formatNumber(market.cryptoPrice, 2)
         : "n/a";
+    const marketPrice =
+      market.marketPrice && market.marketPrice > 0
+        ? formatNumber(market.marketPrice, 4)
+        : "n/a";
+    const priceLabel = "Spot";
+    const marketLabel =
+      market.provider === "kalshi" ? ` | Market: ${marketPrice}` : "";
     const diff =
       market.priceDiff === null
         ? "n/a"
@@ -215,7 +225,7 @@ export class ProfileDashboard {
 
     let output = `${colors.bright}${market.coin.toUpperCase()}${colors.reset} ${market.marketName}\n`;
     output += `${colors.dim}Slug: ${market.marketSlug}${colors.reset}\n`;
-    output += `Time Left: ${timeLeft} | Ref: ${refPrice} (${refSource}) | Price: ${currentPrice} | Diff: ${diff}\n`;
+    output += `Time Left: ${timeLeft} | Ref: ${refPrice} (${refSource}) | ${priceLabel}: ${spotPrice}${marketLabel} | Diff: ${diff}\n`;
     output += `Favored: ${favored} | Best Bid: ${bid} | Best Ask: ${ask}\n`;
     output += `Data: ${statusColor}${market.dataStatus}${colors.reset} | Price To Beat: ${priceToBeat} (${priceToBeatSource})\n`;
 

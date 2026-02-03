@@ -1,4 +1,5 @@
 import type { MarketSnapshot, OrderBookLevel } from "./market-data-hub";
+import type { MarketProvider } from "../providers/provider";
 import type { SignalSnapshot, TokenSignal } from "./market-signals";
 import type { CoinSymbol } from "./auto-market";
 import { RunLogger } from "./run-logger";
@@ -282,6 +283,7 @@ export interface ProfileMarketView {
   coin: CoinSymbol;
   marketName: string;
   marketSlug: string;
+  provider?: MarketProvider;
   timeLeftSec: number | null;
   priceToBeat: number;
   referencePrice: number;
@@ -293,6 +295,7 @@ export interface ProfileMarketView {
     | "kalshi_html"
     | "missing";
   cryptoPrice: number;
+  marketPrice?: number | null;
   priceDiff: number | null;
   favoredOutcome: string | null;
   bestAsk: number | null;
@@ -520,12 +523,12 @@ export class ProfileEngine {
         snapshot.priceToBeat > 0
           ? snapshot.priceToBeat
           : snapshot.referencePrice;
-      const priceValue = this.resolveSnapshotPrice(snapshot);
-      const hasPrice = threshold > 0 && priceValue > 0;
+      const spotPrice = this.resolveSnapshotPrice(snapshot);
+      const hasPrice = threshold > 0 && spotPrice > 0;
       const priceDiff = hasPrice
-        ? Math.abs(priceValue - threshold)
+        ? Math.abs(spotPrice - threshold)
         : null;
-      const favoredUp = hasPrice ? priceValue >= threshold : null;
+      const favoredUp = hasPrice ? spotPrice >= threshold : null;
       const favoredOutcome = hasPrice
         ? favoredUp
           ? snapshot.upOutcome
@@ -576,11 +579,16 @@ export class ProfileEngine {
         coin,
         marketName: snapshot.marketName,
         marketSlug: snapshot.slug,
+        provider: snapshot.provider,
         timeLeftSec: snapshot.timeLeftSec,
         priceToBeat: snapshot.priceToBeat,
         referencePrice: snapshot.referencePrice,
         referenceSource: snapshot.referenceSource,
-        cryptoPrice: snapshot.cryptoPrice,
+        cryptoPrice: spotPrice,
+        marketPrice:
+          snapshot.provider === "kalshi"
+            ? snapshot.kalshiMarketPrice ?? null
+            : null,
         priceDiff,
         favoredOutcome,
         bestAsk,

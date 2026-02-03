@@ -2,10 +2,21 @@
 
 import { watchMarketRoute } from "./src/routes/watch-market";
 import { fakeTradeRouteWithOptions } from "./src/routes/fake-trade";
+import { crossPlatformAnalysisRoute } from "./src/routes/cross-platform-analysis";
 import { backtestRoute } from "./src/routes/backtest";
 import { selectOne } from "./src/cli/prompts";
 
-type CLIMode = "fake-trade" | "watch-market" | "trading" | "backtest";
+type CoinSymbol = "eth" | "btc" | "sol" | "xrp";
+const COINS: CoinSymbol[] = ["eth", "btc", "sol", "xrp"];
+function normalizeCoins(values: string[] | undefined): CoinSymbol[] | undefined {
+  if (!values || values.length === 0) return undefined;
+  const out = values
+    .map((v) => v.trim().toLowerCase())
+    .filter((v) => COINS.includes(v as CoinSymbol)) as CoinSymbol[];
+  return out.length > 0 ? out : undefined;
+}
+
+type CLIMode = "fake-trade" | "watch-market" | "cross-platform-analysis" | "backtest";
 type Provider = "polymarket" | "kalshi";
 
 interface CLIArgs {
@@ -29,7 +40,7 @@ function normalizeMode(value: string | undefined): CLIMode | undefined {
   const normalized = value.toLowerCase().replace(/_/g, "-");
   if (normalized === "fake-trade" || normalized === "fake") return "fake-trade";
   if (normalized === "watch-market" || normalized === "watch") return "watch-market";
-  if (normalized === "trading" || normalized === "trade") return "trading";
+  if (normalized === "cross-platform-analysis" || normalized === "cross-platform" || normalized === "outcome-analysis" || normalized === "analysis") return "cross-platform-analysis";
   if (normalized === "backtest" || normalized === "historical") return "backtest";
   return undefined;
 }
@@ -89,8 +100,8 @@ function parseArgs(argv: string[]): CLIArgs {
       continue;
     }
 
-    if (raw === "--trading") {
-      args.mode = "trading";
+    if (raw === "--cross-platform-analysis" || raw === "--cross-platform" || raw === "--outcome-analysis" || raw === "--analysis") {
+      args.mode = "cross-platform-analysis";
       continue;
     }
 
@@ -269,14 +280,15 @@ function printUsage(): void {
     "  bun run main.ts -- --mode fake-trade --profiles calmTrader,aggresiveTrader --coins eth,btc",
     "  bun run main.ts -- --mode fake-trade --auto",
     "  bun run main.ts -- --mode watch-market --market \"https://polymarket.com/event/...\"",
+    "  bun run main.ts -- --mode cross-platform-analysis",
     "  bun run main.ts -- --mode backtest --auto --data-dir backtest-data --speed max",
     "  bun run main.ts -- --mode backtest --auto --backtest-mode fast",
     "",
     "Flags:",
-    "  --mode <fake-trade|watch-market|trading|backtest>",
-    "  --fake-trade | --watch-market | --trading | --backtest",
+    "  --mode <fake-trade|watch-market|cross-platform-analysis|backtest>",
+    "  --fake-trade | --watch-market | --cross-platform-analysis | --backtest",
     "  --profiles <name1,name2>   (fake-trade)",
-    "  --coins <eth,btc,sol,xrp>  (fake-trade)",
+    "  --coins <eth,btc,sol,xrp>  (fake-trade, cross-platform-analysis)",
     "  --auto                     (fake-trade: select all profiles/coins)",
     "  --provider <polymarket|kalshi> (fake-trade/watch-market)",
     "  --kalshi | --polymarket    (provider shortcut)",
@@ -286,7 +298,7 @@ function printUsage(): void {
     "  --backtest-mode <fast|visual> (backtest)",
     "  --fast                    (backtest alias for fast)",
     "  --visual                  (backtest alias for visual)",
-    "  --headless                (backtest/fake-trade: disable dashboard UI)",
+    "  --headless                (backtest/fake-trade/cross-platform-analysis: disable dashboard UI)",
     "  --start <iso|ms>           (backtest)",
     "  --end <iso|ms>             (backtest)",
     "  --help",
@@ -295,8 +307,8 @@ function printUsage(): void {
 }
 
 const menuChoices: Array<{ title: string; value: CLIMode }> = [
-  { title: "Start fake trade", value: "fake-trade" },
-  { title: "Start trading", value: "trading" },
+  { title: "Start fake trading", value: "fake-trade" },
+  { title: "Start cross-platform outcome analyzation", value: "cross-platform-analysis" },
   { title: "Watch market", value: "watch-market" },
   { title: "Backtest (historical)", value: "backtest" },
 ];
@@ -333,11 +345,11 @@ const run = async () => {
     return;
   }
 
-  if (cliArgs.mode === "trading") {
-    console.log("\nStarting trading bot...");
-    console.log(
-      "This will route to a future CLI file for trading configuration and execution.\n",
-    );
+  if (cliArgs.mode === "cross-platform-analysis") {
+    await crossPlatformAnalysisRoute({
+      coins: normalizeCoins(cliArgs.coins),
+      headless: cliArgs.headless,
+    });
     return;
   }
 
@@ -377,11 +389,8 @@ const run = async () => {
     return;
   }
 
-  if (selectedMode === "trading") {
-    console.log("\nStarting trading bot...");
-    console.log(
-      "This will route to a future CLI file for trading configuration and execution.\n",
-    );
+  if (selectedMode === "cross-platform-analysis") {
+    await crossPlatformAnalysisRoute();
     return;
   }
 
