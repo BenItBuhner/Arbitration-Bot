@@ -59,6 +59,11 @@ function parseEnvNumber(
   return Math.max(minValue, parsed);
 }
 
+function normalizeTimestamp(value: number): number {
+  if (!Number.isFinite(value)) return Date.now();
+  return value >= 1e12 ? value : value * 1000;
+}
+
 const HTML_REF_REFRESH_MS = parseEnvNumber("PM_HTML_REF_REFRESH_MS", 60000, 5000);
 const HTML_REF_RETRY_BASE_MS = parseEnvNumber("PM_HTML_REF_RETRY_BASE_MS", 8000, 1000);
 const HTML_REF_RETRY_MAX_MS = parseEnvNumber("PM_HTML_REF_RETRY_MAX_MS", 60000, 5000);
@@ -98,6 +103,11 @@ export interface OrderBookLevel {
   size: number;
 }
 
+export interface PricePoint {
+  price: number;
+  ts: number;
+}
+
 export interface OrderBookSnapshot {
   bids: OrderBookLevel[];
   asks: OrderBookLevel[];
@@ -116,6 +126,7 @@ export interface MarketSnapshot {
   marketTicker?: string | null;
   eventTicker?: string | null;
   timeLeftSec: number | null;
+  marketCloseTimeMs?: number | null;
   priceToBeat: number;
   referencePrice: number;
   referenceSource:
@@ -144,6 +155,7 @@ export interface MarketSnapshot {
   bestBid: Map<string, number>;
   bestAsk: Map<string, number>;
   priceHistory: number[];
+  priceHistoryWithTs?: PricePoint[];
   signals?: SignalSnapshot;
 }
 
@@ -312,6 +324,7 @@ export class MarketDataHub {
       marketTicker: null,
       eventTicker: null,
       timeLeftSec: this.getTimeLeftSec(marketEndMs),
+      marketCloseTimeMs: marketEndMs,
       upOutcome: outcomes[upIndex] || "Up",
       downOutcome: outcomes[downIndex] || "Down",
       upTokenId,
@@ -332,6 +345,7 @@ export class MarketDataHub {
       lastDataStatusMs: 0,
       selectedAtMs: Date.now(),
       priceHistory: [],
+      priceHistoryWithTs: [],
       lastReferenceAttemptMs: 0,
       referenceAttempts: 0,
       lastMissingRefLogMs: 0,
@@ -425,13 +439,21 @@ export class MarketDataHub {
     const state = this.states.get(coin);
     if (!state) return;
 
+    const ts = normalizeTimestamp(payload.timestamp);
     state.cryptoPrice = payload.value;
-    state.cryptoPriceTimestamp = payload.timestamp;
+    state.cryptoPriceTimestamp = ts;
     state.lastPriceUpdateMs = Date.now();
     state.lastCryptoUpdateMs = state.lastPriceUpdateMs;
     state.priceHistory.push(payload.value);
     if (state.priceHistory.length > PRICE_HISTORY_LIMIT) {
       state.priceHistory.shift();
+    }
+    if (!state.priceHistoryWithTs) {
+      state.priceHistoryWithTs = [];
+    }
+    state.priceHistoryWithTs.push({ price: payload.value, ts });
+    if (state.priceHistoryWithTs.length > PRICE_HISTORY_LIMIT) {
+      state.priceHistoryWithTs.shift();
     }
 
   }

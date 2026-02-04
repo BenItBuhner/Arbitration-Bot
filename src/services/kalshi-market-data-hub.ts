@@ -12,7 +12,11 @@ import {
   KALSHI_PROD_BASE,
   KALSHI_PROD_WS,
 } from "../clients/kalshi/kalshi-config";
-import type { MarketSnapshot, OrderBookSnapshot, OrderBookLevel } from "./market-data-hub";
+import type {
+  MarketSnapshot,
+  OrderBookSnapshot,
+  OrderBookLevel,
+} from "./market-data-hub";
 import type { KalshiCoinSelection } from "./profile-config";
 import {
   deriveSeriesTickerFromMarket,
@@ -31,7 +35,6 @@ const SIGNAL_SLIPPAGE_NOTIONAL = 50;
 const SIGNAL_TRADE_WINDOW_MS = 5 * 60 * 1000;
 const KALSHI_REF_RETRY_BASE_MS = 5000;
 const KALSHI_REF_RETRY_MAX_MS = 120000;
-const KALSHI_REF_RETRY_WINDOW_MS = 5 * 60 * 1000;
 const KALSHI_HTML_REF_RETRY_BASE_MS = 15000;
 const KALSHI_HTML_REF_RETRY_MAX_MS = 120000;
 const KALSHI_HTML_REF_TIMEOUT_MS = 10000;
@@ -94,9 +97,21 @@ function parseTimestamp(value: unknown): number | null {
   return null;
 }
 
+function normalizeTimestamp(value: number): number {
+  return value >= 1e12 ? value : value * 1000;
+}
+
 function parseNumericString(value: string): number | null {
   const cleaned = value.replace(/[$,%]/g, "").replace(/,/g, "").trim();
   if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractNumericFromText(value: string): number | null {
+  const match = value.match(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/);
+  if (!match || !match[1]) return null;
+  const cleaned = match[1].replace(/,/g, "");
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -152,6 +167,40 @@ function normalizeMarketPrice(raw: unknown, dollars: unknown): number | null {
   const rawValue = extractNumericValue(raw);
   if (rawValue === null) return null;
   return rawValue > 1.5 ? rawValue / 100 : rawValue;
+}
+
+function formatPriceToBeatLabel(value: number): string {
+  const formatted = value.toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `Price to beat: ${formatted}`;
+}
+
+function shouldUpdatePriceLabel(label: string, threshold: number): boolean {
+  const lower = label.trim().toLowerCase();
+  if (!lower) return true;
+  if (lower.includes("tbd") || lower.includes("pending") || lower.includes("n/a")) {
+    return true;
+  }
+  if (!lower.includes("price to beat")) return false;
+  const parsed = extractNumericFromText(label);
+  if (parsed === null) return true;
+  return Math.abs(parsed - threshold) > 0.01;
+}
+
+function maybeUpdateOutcomeLabels(state: KalshiMarketState): void {
+  const threshold = state.priceToBeat > 0 ? state.priceToBeat : state.referencePrice;
+  if (!threshold || threshold <= 0) return;
+  const label = formatPriceToBeatLabel(threshold);
+  if (shouldUpdatePriceLabel(state.upOutcome ?? "", threshold)) {
+    state.upOutcome = label;
+  }
+  if (shouldUpdatePriceLabel(state.downOutcome ?? "", threshold)) {
+    state.downOutcome = label;
+  }
 }
 
 function resolveMarketTicker(market: Record<string, unknown>): string | null {
@@ -731,6 +780,7 @@ export class KalshiMarketDataHub {
       eventTicker: eventTicker,
       seriesSlug: seriesTicker ?? null,
       timeLeftSec: closeTime ? (closeTime - now) / 1000 : null,
+      marketCloseTimeMs: closeTime,
       priceToBeat,
       referencePrice,
       referenceSource,
@@ -750,6 +800,7 @@ export class KalshiMarketDataHub {
       bestBid: new Map(),
       bestAsk: new Map(),
       priceHistory: [],
+      priceHistoryWithTs: [],
       kalshiMarketPrice: null,
       kalshiMarketPriceTs: null,
       kalshiMarketPriceHistory: [],
@@ -768,6 +819,8 @@ export class KalshiMarketDataHub {
       lastRefRetryMs: 0,
       priceFeed: null,
     };
+
+    maybeUpdateOutcomeLabels(state);
 
     const feed = new KalshiPriceFeed(
       this.kalshiConfig,
@@ -844,12 +897,20 @@ export class KalshiMarketDataHub {
     const state = this.states.get(coin);
     if (!state) return;
 
+    const ts = normalizeTimestamp(payload.timestamp);
     state.cryptoPrice = payload.value;
-    state.cryptoPriceTimestamp = payload.timestamp;
+    state.cryptoPriceTimestamp = ts;
     state.lastCryptoUpdateMs = Date.now();
     state.priceHistory.push(payload.value);
     if (state.priceHistory.length > 180) {
       state.priceHistory.shift();
+    }
+    if (!state.priceHistoryWithTs) {
+      state.priceHistoryWithTs = [];
+    }
+    state.priceHistoryWithTs.push({ price: payload.value, ts });
+    if (state.priceHistoryWithTs.length > 180) {
+      state.priceHistoryWithTs.shift();
     }
   }
 
@@ -966,7 +1027,6 @@ export class KalshiMarketDataHub {
   private maybeRefreshKalshiReference(state: KalshiMarketState, now: number): void {
     if (state.priceToBeat > 0) return;
     if (state.kalshiUnderlyingValue && state.kalshiUnderlyingValue > 0) return;
-    if (now - state.selectedAtMs > KALSHI_REF_RETRY_WINDOW_MS) return;
 
     if (state.lastRefRetryMs > 0) {
       const attempt = Math.max(0, state.refRetryAttempts);
@@ -1012,6 +1072,8 @@ export class KalshiMarketDataHub {
           state.kalshiUnderlyingValue = underlyingValue;
           state.kalshiUnderlyingTs = underlyingTs ?? Date.now();
         }
+
+        maybeUpdateOutcomeLabels(state);
       })
       .catch(() => {});
   }
@@ -1076,6 +1138,8 @@ export class KalshiMarketDataHub {
             state.referenceSource = "kalshi_underlying";
           }
         }
+
+        maybeUpdateOutcomeLabels(state);
 
         if (updated) {
           this.logger.log(

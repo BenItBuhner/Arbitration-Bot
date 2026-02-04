@@ -32,6 +32,7 @@ interface CLIArgs {
   end?: string;
   backtestMode?: "fast" | "visual";
   headless?: boolean;
+  headlessSummary?: boolean;
   help?: boolean;
 }
 
@@ -121,6 +122,16 @@ function parseArgs(argv: string[]): CLIArgs {
     }
 
     if (raw === "--headless") {
+      args.headless = true;
+      continue;
+    }
+
+    if (
+      raw === "--headless-summary" ||
+      raw === "--summary-logs" ||
+      raw === "--summary-log"
+    ) {
+      args.headlessSummary = true;
       args.headless = true;
       continue;
     }
@@ -299,6 +310,7 @@ function printUsage(): void {
     "  --fast                    (backtest alias for fast)",
     "  --visual                  (backtest alias for visual)",
     "  --headless                (backtest/fake-trade/cross-platform-analysis: disable dashboard UI)",
+    "  --headless-summary        (cross-platform-analysis: headless + concise summary logs)",
     "  --start <iso|ms>           (backtest)",
     "  --end <iso|ms>             (backtest)",
     "  --help",
@@ -349,6 +361,7 @@ const run = async () => {
     await crossPlatformAnalysisRoute({
       coins: normalizeCoins(cliArgs.coins),
       headless: cliArgs.headless,
+      headlessSummary: cliArgs.headlessSummary,
     });
     return;
   }

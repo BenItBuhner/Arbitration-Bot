@@ -5,28 +5,553 @@
 
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { MarketDataHub } from "../services/market-data-hub";
+import { MarketDataHub, type MarketSnapshot } from "../services/market-data-hub";
 import { KalshiMarketDataHub } from "../services/kalshi-market-data-hub";
 import { RunLogger } from "../services/run-logger";
 import { loadProviderConfig } from "../services/profile-config";
 import { getKalshiEnvConfig } from "../clients/kalshi/kalshi-config";
+import { KalshiClient } from "../clients/kalshi/kalshi-client";
 import type { CoinSymbol } from "../services/auto-market";
+import { parseUpDownSlugStartMs } from "../services/auto-market";
 import {
-  computeFavoredOutcome,
   computeOddsMid,
   createAccuracyState,
   updateAccuracy,
+  normalizeOutcomeLabel,
   type NormalizedOutcome,
   type AccuracyState,
 } from "../services/cross-platform-compare";
 import { CrossPlatformDashboard } from "../cli/cross-platform-dashboard";
+import { extractOutcomes, getMarketBySlug } from "../services/market-service";
 
 const ODDS_HISTORY_LIMIT = 180;
 const RENDER_INTERVAL_MS = 500;
+const MISMATCH_HISTORY_TAIL = 6;
+const FINAL_WINDOW_MS = parseEnvNumber("CROSS_ANALYSIS_FINAL_WINDOW_MS", 60_000, 10_000);
+const FINAL_GRACE_MS = parseEnvNumber("CROSS_ANALYSIS_FINAL_GRACE_MS", 120_000, 30_000);
+const FINAL_MIN_POINTS = parseEnvNumber("CROSS_ANALYSIS_FINAL_MIN_POINTS", 3, 1);
+const OFFICIAL_MAX_WAIT_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_OFFICIAL_WAIT_MS",
+  45_000,
+  5_000,
+);
+const FINAL_STALE_AFTER_MS = Math.min(FINAL_GRACE_MS, OFFICIAL_MAX_WAIT_MS);
+const MATCH_TIME_TOLERANCE_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_MATCH_TIME_TOLERANCE_MS",
+  120_000,
+  10_000,
+);
+const SLOT_DURATION_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_SLOT_DURATION_MS",
+  15 * 60 * 1000,
+  60 * 1000,
+);
+const SLOT_TOLERANCE_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_SLOT_TOLERANCE_MS",
+  90_000,
+  10_000,
+);
+const STALE_LOG_INTERVAL_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_STALE_LOG_MS",
+  30_000,
+  5_000,
+);
+const PRICE_STALE_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_PRICE_STALE_MS",
+  20_000,
+  5_000,
+);
+const BOOK_STALE_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_BOOK_STALE_MS",
+  30_000,
+  5_000,
+);
+const SUMMARY_LOG_INTERVAL_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_SUMMARY_LOG_MS",
+  300_000,
+  60_000,
+);
+const OFFICIAL_RETRY_BASE_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_OFFICIAL_RETRY_BASE_MS",
+  10_000,
+  2_000,
+);
+const OFFICIAL_RETRY_MAX_MS = parseEnvNumber(
+  "CROSS_ANALYSIS_OFFICIAL_RETRY_MAX_MS",
+  120_000,
+  10_000,
+);
+const OFFICIAL_RETRY_LIMIT = parseEnvNumber(
+  "CROSS_ANALYSIS_OFFICIAL_RETRIES",
+  0,
+  0,
+);
+
+function parseEnvFlag(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const normalized = raw.trim().toLowerCase();
+  if (["false", "0", "off", "no"].includes(normalized)) return false;
+  if (["true", "1", "on", "yes"].includes(normalized)) return true;
+  return defaultValue;
+}
+
+function parseEnvNumber(
+  name: string,
+  defaultValue: number,
+  minValue: number,
+): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.max(minValue, parsed);
+}
+
+function formatMaybe(value: number | null | undefined, decimals: number): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "n/a";
+  return value.toFixed(decimals);
+}
+
+function formatIso(ms: number | null | undefined): string {
+  if (!ms || !Number.isFinite(ms)) return "n/a";
+  return new Date(ms).toISOString();
+}
+
+function parseNumeric(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[$,%]/g, "").replace(/,/g, "").trim();
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return parseNumeric(record.value ?? record.display_value ?? record.close ?? record.open);
+  }
+  return null;
+}
+
+function findNumericByKeys(
+  record: Record<string, unknown>,
+  keys: string[],
+): { value: number | null; key: string | null } {
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    const parsed = parseNumeric(record[key]);
+    if (parsed !== null && Number.isFinite(parsed)) {
+      return { value: parsed, key };
+    }
+  }
+  return { value: null, key: null };
+}
+
+function normalizeOutcomeValue(
+  value: unknown,
+  outcomes?: string[],
+): NormalizedOutcome | null {
+  if (typeof value === "string") {
+    const normalized = normalizeOutcomeLabel(value);
+    return normalized === "UNKNOWN" ? null : normalized;
+  }
+  if (typeof value === "boolean") {
+    return value ? "UP" : "DOWN";
+  }
+  if (typeof value === "number" && outcomes && outcomes.length > 0) {
+    const idx = Math.round(value);
+    if (idx >= 0 && idx < outcomes.length) {
+      const normalized = normalizeOutcomeLabel(outcomes[idx] ?? "");
+      return normalized === "UNKNOWN" ? null : normalized;
+    }
+  }
+  return null;
+}
+
+function parseOutcomePrices(value: unknown): number[] | null {
+  if (!value) return null;
+  if (Array.isArray(value)) {
+    const parsed = value.map((v) => parseNumeric(v)).filter((v) => v != null) as number[];
+    return parsed.length > 0 ? parsed : null;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        const nums = parsed.map((v) => parseNumeric(v)).filter((v) => v != null) as number[];
+        return nums.length > 0 ? nums : null;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function tail(values: number[] | undefined, limit: number): number[] {
+  if (!values || values.length === 0) return [];
+  return values.length <= limit ? values.slice() : values.slice(-limit);
+}
+
+function resolveThreshold(snapshot: MarketSnapshot): {
+  value: number | null;
+  source: string;
+} {
+  if (snapshot.priceToBeat > 0) {
+    return { value: snapshot.priceToBeat, source: "price_to_beat" };
+  }
+  if (snapshot.referencePrice > 0) {
+    return { value: snapshot.referencePrice, source: snapshot.referenceSource };
+  }
+  const labelCandidates = [snapshot.upOutcome, snapshot.downOutcome];
+  for (const label of labelCandidates) {
+    if (!label) continue;
+    const lower = label.toLowerCase();
+    if (!lower.includes("price to beat")) continue;
+    const parsed = parseNumeric(label);
+    if (parsed !== null && parsed > 0) {
+      return { value: parsed, source: "label" };
+    }
+  }
+  return { value: null, source: snapshot.referenceSource ?? "missing" };
+}
+
+function resolveCloseTimeMs(
+  snapshot: MarketSnapshot,
+  now: number,
+): number | null {
+  if (
+    snapshot.marketCloseTimeMs !== null &&
+    snapshot.marketCloseTimeMs !== undefined &&
+    Number.isFinite(snapshot.marketCloseTimeMs)
+  ) {
+    return snapshot.marketCloseTimeMs;
+  }
+  if (
+    snapshot.timeLeftSec !== null &&
+    snapshot.timeLeftSec !== undefined &&
+    Number.isFinite(snapshot.timeLeftSec)
+  ) {
+    return now + snapshot.timeLeftSec * 1000;
+  }
+  return null;
+}
+
+function resolveSlotStartMs(
+  snapshot: MarketSnapshot,
+  now: number,
+  durationMs: number,
+): number | null {
+  if (snapshot.provider === "polymarket") {
+    const parsed = parseUpDownSlugStartMs(snapshot.slug);
+    if (parsed) return parsed;
+  }
+  const closeTime = resolveCloseTimeMs(snapshot, now);
+  if (closeTime !== null) {
+    return closeTime - durationMs;
+  }
+  return null;
+}
+
+function computeAgeMs(value: number | null | undefined, now: number): number | null {
+  if (!value || !Number.isFinite(value) || value <= 0) return null;
+  return Math.max(0, now - value);
+}
+
+function computeFinalPrice(
+  snapshot: MarketSnapshot,
+  now: number,
+  allowStaleAfterMs: number,
+): {
+  value: number | null;
+  source: string;
+  points: number;
+  coverageMs: number | null;
+  windowMs: number;
+} {
+  const closeTimeMs = resolveCloseTimeMs(snapshot, now);
+  const allowStale =
+    closeTimeMs === null ? true : now - closeTimeMs > allowStaleAfterMs;
+
+  if (
+    snapshot.provider === "kalshi" &&
+    snapshot.kalshiUnderlyingValue != null &&
+    Number.isFinite(snapshot.kalshiUnderlyingValue) &&
+    snapshot.kalshiUnderlyingValue > 0
+  ) {
+    const ts = snapshot.kalshiUnderlyingTs ?? null;
+    const withinWindow =
+      closeTimeMs !== null && ts !== null
+        ? Math.abs(closeTimeMs - ts) <= FINAL_WINDOW_MS
+        : false;
+    if (withinWindow || allowStale || closeTimeMs === null) {
+      return {
+        value: snapshot.kalshiUnderlyingValue,
+        source: withinWindow ? "kalshi_underlying" : "kalshi_underlying_stale",
+        points: 1,
+        coverageMs: null,
+        windowMs: FINAL_WINDOW_MS,
+      };
+    }
+  }
+
+  if (closeTimeMs !== null && snapshot.priceHistoryWithTs) {
+    const windowStart = closeTimeMs - FINAL_WINDOW_MS;
+    const points = snapshot.priceHistoryWithTs.filter(
+      (p) => p.ts >= windowStart && p.ts <= closeTimeMs,
+    );
+    if (points.length >= FINAL_MIN_POINTS) {
+      const sum = points.reduce((acc, p) => acc + p.price, 0);
+      const avg = sum / points.length;
+      const coverage = points[points.length - 1].ts - points[0].ts;
+      return {
+        value: avg,
+        source: "spot_avg_window",
+        points: points.length,
+        coverageMs: coverage,
+        windowMs: FINAL_WINDOW_MS,
+      };
+    }
+  }
+
+  if (closeTimeMs !== null && !allowStale) {
+    return {
+      value: null,
+      source: "pending_final_price",
+      points: 0,
+      coverageMs: null,
+      windowMs: FINAL_WINDOW_MS,
+    };
+  }
+
+  const spot = snapshot.cryptoPrice > 0 ? snapshot.cryptoPrice : null;
+  if (spot != null) {
+    return {
+      value: spot,
+      source: allowStale ? "spot_last_stale" : "spot_last",
+      points: 1,
+      coverageMs: null,
+      windowMs: FINAL_WINDOW_MS,
+    };
+  }
+
+  return {
+    value: null,
+    source: "missing",
+    points: 0,
+    coverageMs: null,
+    windowMs: FINAL_WINDOW_MS,
+  };
+}
+
+function computeOutcomeFromValues(
+  price: number | null,
+  threshold: number | null,
+): NormalizedOutcome {
+  if (
+    price === null ||
+    threshold === null ||
+    !Number.isFinite(price) ||
+    !Number.isFinite(threshold) ||
+    threshold <= 0
+  ) {
+    return "UNKNOWN";
+  }
+  return price >= threshold ? "UP" : "DOWN";
+}
+
+interface OfficialOutcomeResult {
+  outcome: NormalizedOutcome | null;
+  outcomeSource: string | null;
+  finalPrice: number | null;
+  finalPriceSource: string | null;
+}
+
+async function fetchPolymarketOfficialOutcome(
+  slug: string,
+): Promise<OfficialOutcomeResult> {
+  const market = await getMarketBySlug(slug);
+  if (!market) {
+    return { outcome: null, outcomeSource: null, finalPrice: null, finalPriceSource: null };
+  }
+  const record = market as Record<string, unknown>;
+  const outcomes = extractOutcomes(market);
+
+  const outcomeKeys = [
+    "resolution",
+    "resolvedOutcome",
+    "resolved_outcome",
+    "result",
+    "winningOutcome",
+    "winning_outcome",
+    "finalOutcome",
+    "final_outcome",
+    "outcome",
+    "answer",
+  ];
+  let outcome: NormalizedOutcome | null = null;
+  let outcomeSource: string | null = null;
+  for (const key of outcomeKeys) {
+    if (!(key in record)) continue;
+    const candidate = normalizeOutcomeValue(record[key], outcomes);
+    if (candidate) {
+      outcome = candidate;
+      outcomeSource = key;
+      break;
+    }
+  }
+
+  if (!outcome) {
+    const prices = parseOutcomePrices(record.outcomePrices ?? record.outcome_prices);
+    if (prices && outcomes.length === prices.length) {
+      let maxIdx = 0;
+      let maxVal = prices[0] ?? 0;
+      for (let i = 1; i < prices.length; i += 1) {
+        if ((prices[i] ?? 0) > maxVal) {
+          maxVal = prices[i] ?? 0;
+          maxIdx = i;
+        }
+      }
+      if (maxVal >= 0.95) {
+        const candidate = normalizeOutcomeValue(maxIdx, outcomes);
+        if (candidate) {
+          outcome = candidate;
+          outcomeSource = "outcomePrices";
+        }
+      }
+    }
+  }
+
+  const priceKeys = [
+    "finalPrice",
+    "final_price",
+    "settlement_price",
+    "settlementPrice",
+    "final_value",
+    "finalValue",
+    "settlement_value",
+    "resolution_price",
+    "close_price",
+    "closing_price",
+  ];
+  const numeric = findNumericByKeys(record, priceKeys);
+  return {
+    outcome,
+    outcomeSource,
+    finalPrice: numeric.value,
+    finalPriceSource: numeric.key,
+  };
+}
+
+async function fetchKalshiOfficialOutcome(
+  client: KalshiClient,
+  ticker: string,
+): Promise<OfficialOutcomeResult> {
+  const market = await client.getMarket(ticker);
+  if (!market) {
+    return { outcome: null, outcomeSource: null, finalPrice: null, finalPriceSource: null };
+  }
+  const record = market as Record<string, unknown>;
+
+  const outcomeKeys = [
+    "result",
+    "market_result",
+    "settlement_result",
+    "final_result",
+    "resolution",
+    "resolved_outcome",
+    "settled_outcome",
+    "outcome",
+  ];
+  let outcome: NormalizedOutcome | null = null;
+  let outcomeSource: string | null = null;
+  for (const key of outcomeKeys) {
+    if (!(key in record)) continue;
+    const candidate = normalizeOutcomeValue(record[key], ["Yes", "No"]);
+    if (candidate) {
+      outcome = candidate;
+      outcomeSource = key;
+      break;
+    }
+  }
+
+  const priceKeys = [
+    "settlement_price",
+    "settlement_price_dollars",
+    "settlement_price_cents",
+    "final_price",
+    "final_price_dollars",
+    "final_price_cents",
+    "settlement_value",
+    "final_value",
+    "resolution_price",
+    "close_price",
+    "closing_price",
+  ];
+  const numeric = findNumericByKeys(record, priceKeys);
+  return {
+    outcome,
+    outcomeSource,
+    finalPrice: numeric.value,
+    finalPriceSource: numeric.key,
+  };
+}
+
+function getOrderBookSummary(snapshot: MarketSnapshot, tokenId?: string | null): {
+  bestBid: number | null;
+  bestAsk: number | null;
+  mid: number | null;
+  lastTrade: number | null;
+  totalBidValue: number | null;
+  totalAskValue: number | null;
+  bidLevels: number | null;
+  askLevels: number | null;
+} {
+  if (!tokenId) {
+    return {
+      bestBid: null,
+      bestAsk: null,
+      mid: null,
+      lastTrade: null,
+      totalBidValue: null,
+      totalAskValue: null,
+      bidLevels: null,
+      askLevels: null,
+    };
+  }
+  const bestBid = snapshot.bestBid.get(tokenId) ?? null;
+  const bestAsk = snapshot.bestAsk.get(tokenId) ?? null;
+  const mid = computeOddsMid(bestBid, bestAsk);
+  const book = snapshot.orderBooks.get(tokenId);
+  return {
+    bestBid,
+    bestAsk,
+    mid,
+    lastTrade: book?.lastTrade ?? null,
+    totalBidValue: book?.totalBidValue ?? null,
+    totalAskValue: book?.totalAskValue ?? null,
+    bidLevels: book?.bids.length ?? null,
+    askLevels: book?.asks.length ?? null,
+  };
+}
+
+function getNextRunDir(rootDir: string): { runDir: string; runId: string } {
+  let index = 1;
+  while (true) {
+    const name = index === 1 ? "run" : `run${index}`;
+    const candidate = join(rootDir, name);
+    if (!existsSync(candidate)) {
+      mkdirSync(candidate, { recursive: true });
+      return { runDir: candidate, runId: name };
+    }
+    index += 1;
+  }
+}
 
 export interface CrossPlatformAnalysisRouteOptions {
   coins?: CoinSymbol[];
   headless?: boolean;
+  headlessSummary?: boolean;
 }
 
 interface LastComparison {
@@ -36,6 +561,46 @@ interface LastComparison {
   comparedAtMs: number;
   polySlug: string;
   kalshiSlug: string;
+}
+
+interface PairSnapshots {
+  coin: CoinSymbol;
+  polySnap: MarketSnapshot;
+  kalshiSnap: MarketSnapshot;
+  lastSeenMs: number;
+  polyClosePrice?: number | null;
+  polyClosePriceSource?: string | null;
+  polyClosePricePoints?: number | null;
+  polyClosePriceCoverageMs?: number | null;
+  polyClosePriceWindowMs?: number | null;
+  polyCloseThreshold?: number | null;
+  polyCloseThresholdSource?: string | null;
+  polyCloseCapturedMs?: number | null;
+  kalshiClosePrice?: number | null;
+  kalshiClosePriceSource?: string | null;
+  kalshiClosePricePoints?: number | null;
+  kalshiClosePriceCoverageMs?: number | null;
+  kalshiClosePriceWindowMs?: number | null;
+  kalshiCloseThreshold?: number | null;
+  kalshiCloseThresholdSource?: string | null;
+  kalshiCloseCapturedMs?: number | null;
+  polyOutcome?: NormalizedOutcome | null;
+  kalshiOutcome?: NormalizedOutcome | null;
+  unknownLogged?: boolean;
+  polyOfficialOutcome?: NormalizedOutcome | null;
+  polyOfficialOutcomeSource?: string | null;
+  polyOfficialFinalPrice?: number | null;
+  polyOfficialFinalPriceSource?: string | null;
+  polyOfficialFetchAttempts?: number;
+  polyOfficialFetchPending?: boolean;
+  polyOfficialFetchLastMs?: number | null;
+  kalshiOfficialOutcome?: NormalizedOutcome | null;
+  kalshiOfficialOutcomeSource?: string | null;
+  kalshiOfficialFinalPrice?: number | null;
+  kalshiOfficialFinalPriceSource?: string | null;
+  kalshiOfficialFetchAttempts?: number;
+  kalshiOfficialFetchPending?: boolean;
+  kalshiOfficialFetchLastMs?: number | null;
 }
 
 export async function crossPlatformAnalysisRoute(
@@ -70,6 +635,7 @@ export async function crossPlatformAnalysisRoute(
     );
     return;
   }
+  const kalshiOutcomeClient = new KalshiClient(kalshiEnvConfig);
 
   const kalshiSelectors = kalshiConfigResult.kalshiSelectorsByCoin;
   if (!kalshiSelectors) {
@@ -77,15 +643,32 @@ export async function crossPlatformAnalysisRoute(
     return;
   }
 
-  const runDir = join(process.cwd(), "logs", "cross-platform");
-  if (!existsSync(runDir)) {
-    mkdirSync(runDir, { recursive: true });
+  const logsRoot = join(process.cwd(), "logs", "cross-platform");
+  if (!existsSync(logsRoot)) {
+    mkdirSync(logsRoot, { recursive: true });
   }
-  const logger = new RunLogger(join(runDir, "analysis.log"));
+  const { runDir, runId } = getNextRunDir(logsRoot);
+  const summaryOnly = options.headlessSummary === true;
+  const headless = options.headless || summaryOnly;
+  const systemLogger = new RunLogger(join(runDir, "system.log"));
+  const debugLogger = summaryOnly
+    ? new RunLogger(join(runDir, "debug.log"))
+    : systemLogger;
+  const mismatchLogger = new RunLogger(join(runDir, "mismatch.log"));
+  const verboseAllFinals = parseEnvFlag("CROSS_ANALYSIS_VERBOSE", false);
+  const verboseMismatch = parseEnvFlag("CROSS_ANALYSIS_MISMATCH_VERBOSE", true);
+  systemLogger.log(
+    `Cross-platform analysis run ${runId} started for coins: ${coins.join(", ")}`,
+  );
+  if (summaryOnly) {
+    systemLogger.log(
+      "Headless summary mode enabled (system.log concise, debug.log verbose).",
+    );
+  }
 
-  const polyHub = new MarketDataHub(logger);
+  const polyHub = new MarketDataHub(debugLogger);
   const kalshiHub = new KalshiMarketDataHub(
-    logger,
+    debugLogger,
     kalshiEnvConfig,
     kalshiSelectors,
   );
@@ -98,7 +681,13 @@ export async function crossPlatformAnalysisRoute(
     accuracyByCoin.set(coin, createAccuracyState());
   }
   const lastComparisonByCoin = new Map<CoinSymbol, LastComparison>();
-  const lastComparedKeyByCoin = new Map<CoinSymbol, string>();
+  const pairSnapshotsByKey = new Map<string, PairSnapshots>();
+  const activePairKeyByCoin = new Map<CoinSymbol, string>();
+  const pendingPairKeys = new Set<string>();
+  const comparedPairKeys = new Set<string>();
+  let lastSummaryLogMs = 0;
+  const lastStaleLogByCoin = new Map<CoinSymbol, number>();
+  const staleStateByCoin = new Map<CoinSymbol, boolean>();
 
   const polyOddsHistoryByCoin = new Map<CoinSymbol, number[]>();
   const kalshiOddsHistoryByCoin = new Map<CoinSymbol, number[]>();
@@ -107,11 +696,545 @@ export async function crossPlatformAnalysisRoute(
     kalshiOddsHistoryByCoin.set(coin, []);
   }
 
-  const dashboard = options.headless ? null : new CrossPlatformDashboard();
+  const dashboard = headless ? null : new CrossPlatformDashboard();
 
   const timer = setInterval(() => {
-    const polySnapshots = polyHub.getSnapshots();
-    const kalshiSnapshots = kalshiHub.getSnapshots();
+    try {
+      const now = Date.now();
+      const polySnapshots = polyHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub.getSnapshots();
+
+    const isSnapshotClosed = (snapshot: MarketSnapshot): boolean => {
+      if (
+        snapshot.timeLeftSec !== null &&
+        snapshot.timeLeftSec !== undefined &&
+        snapshot.timeLeftSec <= 0
+      ) {
+        return true;
+      }
+      if (
+        snapshot.marketCloseTimeMs !== null &&
+        snapshot.marketCloseTimeMs !== undefined &&
+        now >= snapshot.marketCloseTimeMs
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const logOutcomeAnalytics = (
+      entry: PairSnapshots,
+      pairKey: string,
+      polyOutcome: NormalizedOutcome | null,
+      kalshiOutcome: NormalizedOutcome | null,
+      matched: boolean,
+      level: "INFO" | "WARN",
+    ): void => {
+      const polyThreshold =
+        entry.polyCloseThreshold ?? resolveThreshold(entry.polySnap).value;
+      const kalshiThreshold =
+        entry.kalshiCloseThreshold ?? resolveThreshold(entry.kalshiSnap).value;
+      const polyPrice =
+        entry.polyClosePrice ??
+        computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).value;
+      const kalshiPrice =
+        entry.kalshiClosePrice ??
+        computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).value;
+
+      const polyUpBook = getOrderBookSummary(
+        entry.polySnap,
+        entry.polySnap.upTokenId,
+      );
+      const polyDownBook = getOrderBookSummary(
+        entry.polySnap,
+        entry.polySnap.downTokenId,
+      );
+      const kalshiYesBook = getOrderBookSummary(entry.kalshiSnap, "YES");
+      const kalshiNoBook = getOrderBookSummary(entry.kalshiSnap, "NO");
+
+      const polyCloseIso = formatIso(entry.polySnap.marketCloseTimeMs ?? null);
+      const kalshiCloseIso = formatIso(entry.kalshiSnap.marketCloseTimeMs ?? null);
+      const closeDeltaSec =
+        entry.polySnap.marketCloseTimeMs && entry.kalshiSnap.marketCloseTimeMs
+          ? Math.round(
+              (entry.kalshiSnap.marketCloseTimeMs -
+                entry.polySnap.marketCloseTimeMs) /
+                1000,
+            )
+          : null;
+
+      const spotTailPoly = tail(entry.polySnap.priceHistory, MISMATCH_HISTORY_TAIL);
+      const spotTailKalshi = tail(
+        entry.kalshiSnap.priceHistory,
+        MISMATCH_HISTORY_TAIL,
+      );
+      const polyOddsTail = tail(
+        polyOddsHistoryByCoin.get(entry.coin),
+        MISMATCH_HISTORY_TAIL,
+      );
+      const kalshiOddsTail = tail(
+        kalshiOddsHistoryByCoin.get(entry.coin),
+        MISMATCH_HISTORY_TAIL,
+      );
+
+      const json = {
+        coin: entry.coin,
+        pairKey,
+        matched,
+        polyOutcome,
+        kalshiOutcome,
+        polyOfficialOutcome: entry.polyOfficialOutcome ?? null,
+        polyOfficialOutcomeSource: entry.polyOfficialOutcomeSource ?? null,
+        kalshiOfficialOutcome: entry.kalshiOfficialOutcome ?? null,
+        kalshiOfficialOutcomeSource: entry.kalshiOfficialOutcomeSource ?? null,
+        polyOfficialFinalPrice: entry.polyOfficialFinalPrice ?? null,
+        polyOfficialFinalPriceSource: entry.polyOfficialFinalPriceSource ?? null,
+        kalshiOfficialFinalPrice: entry.kalshiOfficialFinalPrice ?? null,
+        kalshiOfficialFinalPriceSource: entry.kalshiOfficialFinalPriceSource ?? null,
+        polySlug: entry.polySnap.slug,
+        kalshiSlug: entry.kalshiSnap.slug ?? entry.kalshiSnap.marketTicker ?? null,
+        polySeries: entry.polySnap.seriesSlug ?? null,
+        kalshiSeries: entry.kalshiSnap.seriesSlug ?? null,
+        polyEvent: entry.polySnap.eventTicker ?? null,
+        kalshiEvent: entry.kalshiSnap.eventTicker ?? null,
+        polyCloseTimeIso: polyCloseIso,
+        kalshiCloseTimeIso: kalshiCloseIso,
+        closeTimeDeltaSec: closeDeltaSec,
+        polyTimeLeftSec: entry.polySnap.timeLeftSec ?? null,
+        kalshiTimeLeftSec: entry.kalshiSnap.timeLeftSec ?? null,
+        polyThreshold,
+        polyThresholdSource:
+          entry.polyCloseThresholdSource ?? resolveThreshold(entry.polySnap).source,
+        polyFinalPricePoints:
+          entry.polyClosePricePoints ??
+          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).points,
+        polyFinalPriceCoverageMs:
+          entry.polyClosePriceCoverageMs ??
+          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).coverageMs,
+        polyFinalPriceWindowMs:
+          entry.polyClosePriceWindowMs ??
+          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).windowMs,
+        kalshiThreshold,
+        kalshiThresholdSource:
+          entry.kalshiCloseThresholdSource ??
+          resolveThreshold(entry.kalshiSnap).source,
+        kalshiFinalPricePoints:
+          entry.kalshiClosePricePoints ??
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).points,
+        kalshiFinalPriceCoverageMs:
+          entry.kalshiClosePriceCoverageMs ??
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).coverageMs,
+        kalshiFinalPriceWindowMs:
+          entry.kalshiClosePriceWindowMs ??
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).windowMs,
+        polyPriceUsed: polyPrice,
+        polyPriceSource:
+          entry.polyClosePriceSource ??
+          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).source,
+        kalshiPriceUsed: kalshiPrice,
+        kalshiPriceSource:
+          entry.kalshiClosePriceSource ??
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).source,
+        polyPriceDelta:
+          polyPrice != null && polyThreshold != null ? polyPrice - polyThreshold : null,
+        polyPriceDeltaPct:
+          polyPrice != null && polyThreshold != null && polyThreshold !== 0
+            ? ((polyPrice - polyThreshold) / polyThreshold) * 100
+            : null,
+        kalshiPriceDelta:
+          kalshiPrice != null && kalshiThreshold != null
+            ? kalshiPrice - kalshiThreshold
+            : null,
+        kalshiPriceDeltaPct:
+          kalshiPrice != null && kalshiThreshold != null && kalshiThreshold !== 0
+            ? ((kalshiPrice - kalshiThreshold) / kalshiThreshold) * 100
+            : null,
+        polySpotPrice: entry.polySnap.cryptoPrice ?? null,
+        kalshiSpotPrice: entry.kalshiSnap.cryptoPrice ?? null,
+        polySpotAgeSec: entry.polySnap.cryptoPriceTimestamp
+          ? Math.round((now - entry.polySnap.cryptoPriceTimestamp) / 1000)
+          : null,
+        kalshiSpotAgeSec: entry.kalshiSnap.cryptoPriceTimestamp
+          ? Math.round((now - entry.kalshiSnap.cryptoPriceTimestamp) / 1000)
+          : null,
+        kalshiUnderlyingValue: entry.kalshiSnap.kalshiUnderlyingValue ?? null,
+        kalshiUnderlyingTs: formatIso(entry.kalshiSnap.kalshiUnderlyingTs ?? null),
+        kalshiLastPrice: entry.kalshiSnap.kalshiLastPrice ?? null,
+        kalshiMarketPrice: entry.kalshiSnap.kalshiMarketPrice ?? null,
+        polyBook: polyUpBook,
+        polyDownBook,
+        kalshiYesBook,
+        kalshiNoBook,
+        polyDataStatus: entry.polySnap.dataStatus,
+        kalshiDataStatus: entry.kalshiSnap.dataStatus,
+        polyOddsTail,
+        kalshiOddsTail,
+        polySpotTail: spotTailPoly,
+        kalshiSpotTail: spotTailKalshi,
+      };
+
+      const prefix = matched ? "FINAL_MATCH" : "FINAL_MISMATCH";
+      mismatchLogger.log(
+        `${prefix} ${entry.coin.toUpperCase()} pair=${pairKey} poly=${polyOutcome} kalshi=${kalshiOutcome}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} thresholds poly=${formatMaybe(polyThreshold, 2)} (${json.polyThresholdSource}) kalshi=${formatMaybe(kalshiThreshold, 2)} (${json.kalshiThresholdSource})`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} prices poly=${formatMaybe(polyPrice, 2)} (${json.polyPriceSource}) pts=${json.polyFinalPricePoints ?? "n/a"} covMs=${json.polyFinalPriceCoverageMs ?? "n/a"} kalshi=${formatMaybe(kalshiPrice, 2)} (${json.kalshiPriceSource}) pts=${json.kalshiFinalPricePoints ?? "n/a"} covMs=${json.kalshiFinalPriceCoverageMs ?? "n/a"}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} deltas poly=${formatMaybe(json.polyPriceDelta ?? null, 2)} (${formatMaybe(json.polyPriceDeltaPct ?? null, 2)}%) kalshi=${formatMaybe(json.kalshiPriceDelta ?? null, 2)} (${formatMaybe(json.kalshiPriceDeltaPct ?? null, 2)}%)`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} official poly=${json.polyOfficialOutcome ?? "n/a"} (${json.polyOfficialOutcomeSource ?? "n/a"}) kalshi=${json.kalshiOfficialOutcome ?? "n/a"} (${json.kalshiOfficialOutcomeSource ?? "n/a"})`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} odds polyBid=${formatMaybe(polyUpBook.bestBid, 4)} polyAsk=${formatMaybe(polyUpBook.bestAsk, 4)} kalshiBid=${formatMaybe(kalshiYesBook.bestBid, 4)} kalshiAsk=${formatMaybe(kalshiYesBook.bestAsk, 4)}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} liquidity polyYesBid=${formatMaybe(polyUpBook.totalBidValue, 2)} polyYesAsk=${formatMaybe(polyUpBook.totalAskValue, 2)} kalshiYesBid=${formatMaybe(kalshiYesBook.totalBidValue, 2)} kalshiYesAsk=${formatMaybe(kalshiYesBook.totalAskValue, 2)}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} liquidity polyNoBid=${formatMaybe(polyDownBook.totalBidValue, 2)} polyNoAsk=${formatMaybe(polyDownBook.totalAskValue, 2)} kalshiNoBid=${formatMaybe(kalshiNoBook.totalBidValue, 2)} kalshiNoAsk=${formatMaybe(kalshiNoBook.totalAskValue, 2)}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} close poly=${polyCloseIso} kalshi=${kalshiCloseIso} deltaSec=${closeDeltaSec ?? "n/a"}`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} spotTail poly=[${spotTailPoly.map((v) => formatMaybe(v, 2)).join(", ")}] kalshi=[${spotTailKalshi.map((v) => formatMaybe(v, 2)).join(", ")}]`,
+        level,
+      );
+      mismatchLogger.log(
+        `${prefix} oddsTail poly=[${polyOddsTail.map((v) => formatMaybe(v, 4)).join(", ")}] kalshi=[${kalshiOddsTail.map((v) => formatMaybe(v, 4)).join(", ")}]`,
+        level,
+      );
+      mismatchLogger.log(`${prefix}_JSON ${JSON.stringify(json)}`, level);
+    };
+
+    const tryFinalizePair = (pairKey: string, entry: PairSnapshots): boolean => {
+      if (comparedPairKeys.has(pairKey)) return true;
+      const polyClosed = isSnapshotClosed(entry.polySnap);
+      const kalshiClosed = isSnapshotClosed(entry.kalshiSnap);
+
+      if (polyClosed && entry.polyOutcome == null) {
+        maybeFetchPolymarketOfficial(entry);
+      }
+      if (kalshiClosed && entry.kalshiOutcome == null) {
+        maybeFetchKalshiOfficial(entry);
+      }
+
+      if (polyClosed && entry.polyOutcome == null) {
+        const threshold = resolveThreshold(entry.polySnap);
+        const finalPrice = computeFinalPrice(
+          entry.polySnap,
+          now,
+          FINAL_STALE_AFTER_MS,
+        );
+        const polyCloseTimeMs = resolveCloseTimeMs(entry.polySnap, now);
+        const polyAttempts = entry.polyOfficialFetchAttempts ?? 0;
+        const allowComputed =
+          (OFFICIAL_RETRY_LIMIT > 0 &&
+            polyAttempts >= OFFICIAL_RETRY_LIMIT) ||
+          (polyCloseTimeMs !== null &&
+            now - polyCloseTimeMs > OFFICIAL_MAX_WAIT_MS);
+        entry.polyClosePrice = finalPrice.value;
+        entry.polyClosePriceSource = finalPrice.source;
+        entry.polyClosePricePoints = finalPrice.points;
+        entry.polyClosePriceCoverageMs = finalPrice.coverageMs;
+        entry.polyClosePriceWindowMs = finalPrice.windowMs;
+        entry.polyCloseThreshold = threshold.value;
+        entry.polyCloseThresholdSource = threshold.source;
+        entry.polyCloseCapturedMs = now;
+        if (
+          allowComputed &&
+          finalPrice.value !== null &&
+          threshold.value !== null &&
+          threshold.value > 0
+        ) {
+          entry.polyOutcome = computeOutcomeFromValues(
+            finalPrice.value,
+            threshold.value,
+          );
+        }
+      }
+
+      if (kalshiClosed && entry.kalshiOutcome == null) {
+        const threshold = resolveThreshold(entry.kalshiSnap);
+        const finalPrice = computeFinalPrice(
+          entry.kalshiSnap,
+          now,
+          FINAL_STALE_AFTER_MS,
+        );
+        const kalshiCloseTimeMs = resolveCloseTimeMs(entry.kalshiSnap, now);
+        const kalshiAttempts = entry.kalshiOfficialFetchAttempts ?? 0;
+        const allowComputed =
+          (OFFICIAL_RETRY_LIMIT > 0 &&
+            kalshiAttempts >= OFFICIAL_RETRY_LIMIT) ||
+          (kalshiCloseTimeMs !== null &&
+            now - kalshiCloseTimeMs > OFFICIAL_MAX_WAIT_MS);
+        entry.kalshiClosePrice = finalPrice.value;
+        entry.kalshiClosePriceSource = finalPrice.source;
+        entry.kalshiClosePricePoints = finalPrice.points;
+        entry.kalshiClosePriceCoverageMs = finalPrice.coverageMs;
+        entry.kalshiClosePriceWindowMs = finalPrice.windowMs;
+        entry.kalshiCloseThreshold = threshold.value;
+        entry.kalshiCloseThresholdSource = threshold.source;
+        entry.kalshiCloseCapturedMs = now;
+        if (
+          allowComputed &&
+          finalPrice.value !== null &&
+          threshold.value !== null &&
+          threshold.value > 0
+        ) {
+          entry.kalshiOutcome = computeOutcomeFromValues(
+            finalPrice.value,
+            threshold.value,
+          );
+        }
+      }
+
+      if (!polyClosed || !kalshiClosed) {
+        return false;
+      }
+
+      const polyCloseTimeMs = resolveCloseTimeMs(entry.polySnap, now);
+      const kalshiCloseTimeMs = resolveCloseTimeMs(entry.kalshiSnap, now);
+      const closeDeltaMs =
+        polyCloseTimeMs && kalshiCloseTimeMs
+          ? Math.abs(polyCloseTimeMs - kalshiCloseTimeMs)
+          : null;
+
+      if (closeDeltaMs !== null && closeDeltaMs > MATCH_TIME_TOLERANCE_MS) {
+        comparedPairKeys.add(pairKey);
+        systemLogger.log(
+          `FINAL outcome skipped for ${entry.coin.toUpperCase()} pair=${pairKey} (close time delta ${(closeDeltaMs / 1000).toFixed(
+            1,
+          )}s exceeds tolerance)`,
+          "WARN",
+        );
+        mismatchLogger.log(
+          `FINAL_SKIPPED ${entry.coin.toUpperCase()} pair=${pairKey} closeDeltaSec=${(
+            closeDeltaMs / 1000
+          ).toFixed(1)} polyClose=${formatIso(polyCloseTimeMs)} kalshiClose=${formatIso(
+            kalshiCloseTimeMs,
+          )}`,
+          "WARN",
+        );
+        return true;
+      }
+      const polyWithinGrace =
+        polyCloseTimeMs !== null && now - polyCloseTimeMs < FINAL_GRACE_MS;
+      const kalshiWithinGrace =
+        kalshiCloseTimeMs !== null && now - kalshiCloseTimeMs < FINAL_GRACE_MS;
+
+      if (
+        entry.polyOutcome == null ||
+        entry.kalshiOutcome == null ||
+        entry.polyOutcome === "UNKNOWN" ||
+        entry.kalshiOutcome === "UNKNOWN"
+      ) {
+        if (polyWithinGrace || kalshiWithinGrace) {
+          return false;
+        }
+        if (!entry.unknownLogged) {
+          entry.unknownLogged = true;
+          logDebug(
+            `FINAL outcome unresolved for ${entry.coin.toUpperCase()} pair=${pairKey} poly=${entry.polyOutcome ?? "null"} kalshi=${entry.kalshiOutcome ?? "null"} (threshold/price missing)`,
+            "WARN",
+          );
+          if (verboseMismatch) {
+            logOutcomeAnalytics(
+              entry,
+              pairKey,
+              entry.polyOutcome ?? null,
+              entry.kalshiOutcome ?? null,
+              false,
+              "WARN",
+            );
+          }
+        }
+        return false;
+      }
+
+      const polyOutcome = entry.polyOutcome;
+      const kalshiOutcome = entry.kalshiOutcome;
+      const matched = polyOutcome === kalshiOutcome;
+
+      const acc = accuracyByCoin.get(entry.coin);
+      if (acc) updateAccuracy(acc, polyOutcome, kalshiOutcome);
+      comparedPairKeys.add(pairKey);
+      lastComparisonByCoin.set(entry.coin, {
+        polyOutcome,
+        kalshiOutcome,
+        matched,
+        comparedAtMs: now,
+        polySlug: entry.polySnap.slug,
+        kalshiSlug:
+          entry.kalshiSnap.slug ?? entry.kalshiSnap.marketTicker ?? "kalshi",
+      });
+
+      systemLogger.log(
+        `FINAL outcome ${entry.coin.toUpperCase()} ${matched ? "matched" : "mismatched"} pair=${pairKey} poly=${polyOutcome} kalshi=${kalshiOutcome}`,
+        matched ? "INFO" : "WARN",
+      );
+      if (!matched && verboseMismatch) {
+        logOutcomeAnalytics(entry, pairKey, polyOutcome, kalshiOutcome, false, "WARN");
+      } else if (matched && verboseAllFinals) {
+        logOutcomeAnalytics(entry, pairKey, polyOutcome, kalshiOutcome, true, "INFO");
+      }
+
+      return true;
+    };
+
+    const shouldAttemptOfficialFetch = (
+      attempts: number,
+      lastMs: number | null | undefined,
+    ): boolean => {
+      if (OFFICIAL_RETRY_LIMIT > 0 && attempts >= OFFICIAL_RETRY_LIMIT) {
+        return false;
+      }
+      if (!lastMs) return true;
+      const delay = Math.min(
+        OFFICIAL_RETRY_MAX_MS,
+        OFFICIAL_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1),
+      );
+      return now - lastMs >= delay;
+    };
+
+    const isPlausibleUnderlying = (
+      price: number,
+      threshold: number | null,
+    ): boolean => {
+      if (threshold && threshold > 100 && price < 10) return false;
+      return true;
+    };
+
+    const logDebug = (message: string, level: "INFO" | "WARN" | "ERROR" = "INFO") => {
+      debugLogger.log(message, level);
+    };
+
+    const maybeFetchPolymarketOfficial = (entry: PairSnapshots): void => {
+      if (entry.polyOfficialFetchPending) return;
+      if (entry.polyOfficialOutcome) return;
+      const attempts = entry.polyOfficialFetchAttempts ?? 0;
+      if (!shouldAttemptOfficialFetch(attempts, entry.polyOfficialFetchLastMs)) return;
+
+      entry.polyOfficialFetchPending = true;
+      entry.polyOfficialFetchAttempts = attempts + 1;
+      entry.polyOfficialFetchLastMs = now;
+
+      void fetchPolymarketOfficialOutcome(entry.polySnap.slug)
+        .then((result) => {
+          entry.polyOfficialFetchPending = false;
+          if (result.outcome) {
+            entry.polyOfficialOutcome = result.outcome;
+            entry.polyOfficialOutcomeSource = result.outcomeSource;
+          }
+          if (result.finalPrice != null) {
+            entry.polyOfficialFinalPrice = result.finalPrice;
+            entry.polyOfficialFinalPriceSource = result.finalPriceSource;
+          }
+
+          const threshold = resolveThreshold(entry.polySnap).value;
+          if (entry.polyOfficialOutcome && entry.polyOutcome == null) {
+            entry.polyOutcome = entry.polyOfficialOutcome;
+            entry.polyCloseCapturedMs = now;
+            logDebug(
+              `OFFICIAL Polymarket outcome ${entry.coin.toUpperCase()} ${entry.polyOfficialOutcome} (${entry.polyOfficialOutcomeSource ?? "unknown"}) slug=${entry.polySnap.slug}`,
+            );
+          } else if (
+            entry.polyOutcome == null &&
+            entry.polyOfficialFinalPrice != null &&
+            isPlausibleUnderlying(entry.polyOfficialFinalPrice, threshold)
+          ) {
+            entry.polyClosePrice = entry.polyOfficialFinalPrice;
+            entry.polyClosePriceSource = `official:${entry.polyOfficialFinalPriceSource ?? "final_price"}`;
+            entry.polyCloseThreshold = threshold;
+            entry.polyCloseThresholdSource = resolveThreshold(entry.polySnap).source;
+            entry.polyCloseCapturedMs = now;
+            entry.polyOutcome = computeOutcomeFromValues(
+              entry.polyOfficialFinalPrice,
+              threshold,
+            );
+            logDebug(
+              `OFFICIAL Polymarket final price ${entry.coin.toUpperCase()} ${formatMaybe(entry.polyOfficialFinalPrice, 2)} (${entry.polyOfficialFinalPriceSource ?? "unknown"}) slug=${entry.polySnap.slug}`,
+            );
+          }
+        })
+        .catch(() => {
+          entry.polyOfficialFetchPending = false;
+        });
+    };
+
+    const maybeFetchKalshiOfficial = (entry: PairSnapshots): void => {
+      if (entry.kalshiOfficialFetchPending) return;
+      if (entry.kalshiOfficialOutcome) return;
+      const attempts = entry.kalshiOfficialFetchAttempts ?? 0;
+      if (!shouldAttemptOfficialFetch(attempts, entry.kalshiOfficialFetchLastMs)) return;
+
+      entry.kalshiOfficialFetchPending = true;
+      entry.kalshiOfficialFetchAttempts = attempts + 1;
+      entry.kalshiOfficialFetchLastMs = now;
+
+      const ticker =
+        entry.kalshiSnap.marketTicker ?? entry.kalshiSnap.slug ?? "";
+      if (!ticker) {
+        entry.kalshiOfficialFetchPending = false;
+        return;
+      }
+
+      void fetchKalshiOfficialOutcome(kalshiOutcomeClient, ticker)
+        .then((result) => {
+          entry.kalshiOfficialFetchPending = false;
+          if (result.outcome) {
+            entry.kalshiOfficialOutcome = result.outcome;
+            entry.kalshiOfficialOutcomeSource = result.outcomeSource;
+          }
+          if (result.finalPrice != null) {
+            entry.kalshiOfficialFinalPrice = result.finalPrice;
+            entry.kalshiOfficialFinalPriceSource = result.finalPriceSource;
+          }
+
+          const threshold = resolveThreshold(entry.kalshiSnap).value;
+          if (entry.kalshiOfficialOutcome && entry.kalshiOutcome == null) {
+            entry.kalshiOutcome = entry.kalshiOfficialOutcome;
+            entry.kalshiCloseCapturedMs = now;
+            logDebug(
+              `OFFICIAL Kalshi outcome ${entry.coin.toUpperCase()} ${entry.kalshiOfficialOutcome} (${entry.kalshiOfficialOutcomeSource ?? "unknown"}) ticker=${ticker}`,
+            );
+          } else if (
+            entry.kalshiOutcome == null &&
+            entry.kalshiOfficialFinalPrice != null &&
+            isPlausibleUnderlying(entry.kalshiOfficialFinalPrice, threshold)
+          ) {
+            entry.kalshiClosePrice = entry.kalshiOfficialFinalPrice;
+            entry.kalshiClosePriceSource = `official:${entry.kalshiOfficialFinalPriceSource ?? "final_price"}`;
+            entry.kalshiCloseThreshold = threshold;
+            entry.kalshiCloseThresholdSource = resolveThreshold(entry.kalshiSnap).source;
+            entry.kalshiCloseCapturedMs = now;
+            entry.kalshiOutcome = computeOutcomeFromValues(
+              entry.kalshiOfficialFinalPrice,
+              threshold,
+            );
+            logDebug(
+              `OFFICIAL Kalshi final price ${entry.coin.toUpperCase()} ${formatMaybe(entry.kalshiOfficialFinalPrice, 2)} (${entry.kalshiOfficialFinalPriceSource ?? "unknown"}) ticker=${ticker}`,
+            );
+          }
+        })
+        .catch(() => {
+          entry.kalshiOfficialFetchPending = false;
+        });
+    };
 
     for (const coin of coins) {
       const polySnap = polySnapshots.get(coin);
@@ -153,48 +1276,163 @@ export async function crossPlatformAnalysisRoute(
         }
       }
 
-      const polyClosed =
-        polySnap?.timeLeftSec !== null &&
-        polySnap?.timeLeftSec !== undefined &&
-        polySnap.timeLeftSec <= 0;
-      const kalshiClosed =
-        kalshiSnap?.timeLeftSec !== null &&
-        kalshiSnap?.timeLeftSec !== undefined &&
-        kalshiSnap.timeLeftSec <= 0;
+      const staleReasons: string[] = [];
+      if (!polySnap) {
+        staleReasons.push("poly_missing");
+      }
+      if (!kalshiSnap) {
+        staleReasons.push("kalshi_missing");
+      }
+      if (polySnap) {
+        if (polySnap.dataStatus !== "healthy") {
+          staleReasons.push(`poly_status:${polySnap.dataStatus}`);
+        }
+        const priceAge = computeAgeMs(polySnap.cryptoPriceTimestamp, now);
+        if (priceAge === null) {
+          staleReasons.push("poly_price_missing");
+        } else if (priceAge > PRICE_STALE_MS) {
+          staleReasons.push(`poly_price_stale:${Math.round(priceAge / 1000)}s`);
+        }
+        const bookAge = computeAgeMs(polySnap.lastBookUpdateMs, now);
+        if (bookAge !== null && bookAge > BOOK_STALE_MS) {
+          staleReasons.push(`poly_book_stale:${Math.round(bookAge / 1000)}s`);
+        }
+      }
+      if (kalshiSnap) {
+        if (kalshiSnap.dataStatus !== "healthy") {
+          staleReasons.push(`kalshi_status:${kalshiSnap.dataStatus}`);
+        }
+        const priceAge = computeAgeMs(kalshiSnap.cryptoPriceTimestamp, now);
+        if (priceAge === null) {
+          staleReasons.push("kalshi_price_missing");
+        } else if (priceAge > PRICE_STALE_MS) {
+          staleReasons.push(
+            `kalshi_price_stale:${Math.round(priceAge / 1000)}s`,
+          );
+        }
+        const bookAge = computeAgeMs(kalshiSnap.lastBookUpdateMs, now);
+        if (bookAge !== null && bookAge > BOOK_STALE_MS) {
+          staleReasons.push(`kalshi_book_stale:${Math.round(bookAge / 1000)}s`);
+        }
+      }
 
-      if (polySnap && kalshiSnap && polyClosed && kalshiClosed) {
-        const polyOutcome = computeFavoredOutcome(polySnap);
-        const kalshiOutcome = computeFavoredOutcome(kalshiSnap);
-        if (polyOutcome !== "UNKNOWN" && kalshiOutcome !== "UNKNOWN") {
-          const pairKey = `${polySnap.slug}|${kalshiSnap.slug ?? kalshiSnap.marketTicker ?? "kalshi"}`;
-          const lastKey = lastComparedKeyByCoin.get(coin);
-          if (lastKey !== pairKey) {
-            const acc = accuracyByCoin.get(coin);
-            if (acc) updateAccuracy(acc, polyOutcome, kalshiOutcome);
-            lastComparedKeyByCoin.set(coin, pairKey);
-            lastComparisonByCoin.set(coin, {
-              polyOutcome,
-              kalshiOutcome,
-              matched: polyOutcome === kalshiOutcome,
-              comparedAtMs: Date.now(),
-              polySlug: polySnap.slug,
-              kalshiSlug: kalshiSnap.slug ?? kalshiSnap.marketTicker ?? "kalshi",
-            });
+      if (polySnap && kalshiSnap) {
+        const polySlotStart = resolveSlotStartMs(polySnap, now, SLOT_DURATION_MS);
+        const kalshiSlotStart = resolveSlotStartMs(
+          kalshiSnap,
+          now,
+          SLOT_DURATION_MS,
+        );
+        if (polySlotStart !== null && kalshiSlotStart !== null) {
+          const slotDelta = Math.abs(polySlotStart - kalshiSlotStart);
+          if (slotDelta > SLOT_TOLERANCE_MS) {
+            staleReasons.push(
+              `slot_mismatch:${Math.round(slotDelta / 1000)}s`,
+            );
+          }
+        } else {
+          if (polySlotStart === null) staleReasons.push("poly_slot_missing");
+          if (kalshiSlotStart === null) staleReasons.push("kalshi_slot_missing");
+        }
+      }
+
+      if (staleReasons.length > 0) {
+        const lastLog = lastStaleLogByCoin.get(coin) ?? 0;
+        if (now - lastLog >= STALE_LOG_INTERVAL_MS) {
+          systemLogger.log(
+            `STALE_DATA ${coin.toUpperCase()} waiting for fresh markets (${staleReasons.join(
+              ", ",
+            )})`,
+            "WARN",
+          );
+          lastStaleLogByCoin.set(coin, now);
+        }
+        staleStateByCoin.set(coin, true);
+        continue;
+      }
+
+      if (staleStateByCoin.get(coin)) {
+        systemLogger.log(
+          `STALE_DATA_RESOLVED ${coin.toUpperCase()} markets back in sync`,
+          "INFO",
+        );
+        staleStateByCoin.set(coin, false);
+      }
+
+      if (polySnap && kalshiSnap) {
+        const pairKey = `${polySnap.slug}|${kalshiSnap.slug ?? kalshiSnap.marketTicker ?? "kalshi"}`;
+        const existing = pairSnapshotsByKey.get(pairKey);
+        if (existing) {
+          existing.polySnap = polySnap;
+          existing.kalshiSnap = kalshiSnap;
+          existing.lastSeenMs = now;
+        } else {
+          pairSnapshotsByKey.set(pairKey, {
+            coin,
+            polySnap,
+            kalshiSnap,
+            lastSeenMs: now,
+          });
+        }
+
+        const lastPairKey = activePairKeyByCoin.get(coin);
+        if (lastPairKey && lastPairKey !== pairKey) {
+          pendingPairKeys.add(lastPairKey);
+        }
+        activePairKeyByCoin.set(coin, pairKey);
+
+        const currentEntry = pairSnapshotsByKey.get(pairKey);
+        if (currentEntry) {
+          if (tryFinalizePair(pairKey, currentEntry)) {
+            pairSnapshotsByKey.delete(pairKey);
           }
         }
       }
     }
 
-    if (dashboard) {
-      dashboard.update({
-        polySnapshots,
-        kalshiSnapshots,
-        coins,
-        accuracyByCoin,
-        polyOddsHistoryByCoin,
-        kalshiOddsHistoryByCoin,
-        lastComparisonByCoin,
-      });
+    for (const pendingKey of pendingPairKeys) {
+      const entry = pairSnapshotsByKey.get(pendingKey);
+      if (!entry) {
+        pendingPairKeys.delete(pendingKey);
+        continue;
+      }
+      if (tryFinalizePair(pendingKey, entry)) {
+        pendingPairKeys.delete(pendingKey);
+        pairSnapshotsByKey.delete(pendingKey);
+      }
+    }
+
+    if (summaryOnly && now - lastSummaryLogMs >= SUMMARY_LOG_INTERVAL_MS) {
+      for (const coin of coins) {
+        const acc = accuracyByCoin.get(coin);
+        const total = acc?.totalCount ?? 0;
+        const matches = acc?.matchCount ?? 0;
+        const rate = total > 0 ? ((100 * matches) / total).toFixed(1) : "n/a";
+        const last = lastComparisonByCoin.get(coin);
+        const lastLabel = last
+          ? `${last.polyOutcome}/${last.kalshiOutcome} (${last.matched ? "match" : "mismatch"})`
+          : "pending";
+        systemLogger.log(
+          `SUMMARY ${coin.toUpperCase()} matches=${matches}/${total} rate=${rate}% last=${lastLabel}`,
+        );
+      }
+      lastSummaryLogMs = now;
+    }
+
+      if (dashboard) {
+        dashboard.update({
+          polySnapshots,
+          kalshiSnapshots,
+          coins,
+          accuracyByCoin,
+          polyOddsHistoryByCoin,
+          kalshiOddsHistoryByCoin,
+          lastComparisonByCoin,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      systemLogger.log(`ANALYSIS_LOOP_ERROR ${message}`, "ERROR");
     }
   }, RENDER_INTERVAL_MS);
 

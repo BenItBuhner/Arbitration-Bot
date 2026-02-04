@@ -5,6 +5,7 @@
 
 import { PriceGraph } from "./price-graph";
 import { colors } from "./dashboard";
+import { enableTui } from "./tui";
 import type { CoinSymbol } from "../services/auto-market";
 import type { MarketSnapshot } from "../services/market-data-hub";
 import type { AccuracyState, NormalizedOutcome } from "../services/cross-platform-compare";
@@ -90,6 +91,9 @@ export class CrossPlatformDashboard {
   private startTime = Date.now();
 
   update(state: CrossPlatformDashboardState, force: boolean = false): void {
+    if (this.renderCount === 0) {
+      enableTui();
+    }
     const now = Date.now();
     if (
       !force &&

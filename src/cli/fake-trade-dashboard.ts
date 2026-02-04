@@ -1,4 +1,5 @@
 import { colors } from "./dashboard";
+import { enableTui } from "./tui";
 
 export interface FakeTradeMarketView {
   coin: string;
@@ -57,6 +58,9 @@ export class FakeTradeDashboard {
 
   update(state: FakeTradeDashboardState, force: boolean = false): void {
     this.state = state;
+    if (this.renderCount === 0) {
+      enableTui();
+    }
     this.render(force);
   }
 

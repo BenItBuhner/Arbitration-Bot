@@ -1,5 +1,6 @@
 import { PriceGraph } from "./price-graph";
 import { colors } from "./dashboard";
+import { enableTui } from "./tui";
 import type { CoinSymbol } from "../services/auto-market";
 import type {
   ProfileMarketView,
@@ -44,6 +45,9 @@ export class ProfileDashboard {
 
   update(state: ProfileDashboardState, force: boolean = false): void {
     this.state = state;
+    if (this.renderCount === 0) {
+      enableTui();
+    }
     this.render(force);
   }
 
