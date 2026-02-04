@@ -301,9 +301,20 @@ function computeFinalPrice(
       (p) => p.ts >= windowStart && p.ts <= closeTimeMs,
     );
     if (points.length >= FINAL_MIN_POINTS) {
+      const first = points[0];
+      const last = points[points.length - 1];
+      if (!first || !last) {
+        return {
+          value: null,
+          source: "pending_final_price",
+          points: 0,
+          coverageMs: null,
+          windowMs: FINAL_WINDOW_MS,
+        };
+      }
       const sum = points.reduce((acc, p) => acc + p.price, 0);
       const avg = sum / points.length;
-      const coverage = points[points.length - 1].ts - points[0].ts;
+      const coverage = last.ts - first.ts;
       return {
         value: avg,
         source: "spot_avg_window",
@@ -374,7 +385,7 @@ async function fetchPolymarketOfficialOutcome(
   if (!market) {
     return { outcome: null, outcomeSource: null, finalPrice: null, finalPriceSource: null };
   }
-  const record = market as Record<string, unknown>;
+  const record = market as unknown as Record<string, unknown>;
   const outcomes = extractOutcomes(market);
 
   const outcomeKeys = [
