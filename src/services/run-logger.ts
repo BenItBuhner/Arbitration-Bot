@@ -3,14 +3,20 @@ import { dirname } from "path";
 
 type LogLevel = "INFO" | "WARN" | "ERROR";
 
+interface RunLoggerOptions {
+  stdout?: boolean;
+}
+
 export class RunLogger {
   private lines: string[] = [];
   private maxLines: number;
   private logPath: string;
+  private alsoStdout: boolean;
 
-  constructor(logPath: string, maxLines: number = 200) {
+  constructor(logPath: string, maxLines: number = 200, options?: RunLoggerOptions) {
     this.logPath = logPath;
     this.maxLines = maxLines;
+    this.alsoStdout = options?.stdout === true;
     this.ensureDir();
     this.writeLine(`--- Run started ${new Date().toISOString()} ---`);
   }
@@ -47,5 +53,8 @@ export class RunLogger {
 
   private writeLine(line: string): void {
     appendFileSync(this.logPath, line + "\n", { encoding: "utf8" });
+    if (this.alsoStdout) {
+      process.stdout.write(line + "\n");
+    }
   }
 }

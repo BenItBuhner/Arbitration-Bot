@@ -661,7 +661,9 @@ export async function crossPlatformAnalysisRoute(
   const { runDir, runId } = getNextRunDir(logsRoot);
   const summaryOnly = options.headlessSummary === true;
   const headless = options.headless || summaryOnly;
-  const systemLogger = new RunLogger(join(runDir, "system.log"));
+  const systemLogger = new RunLogger(join(runDir, "system.log"), 200, {
+    stdout: summaryOnly,
+  });
   const debugLogger = summaryOnly
     ? new RunLogger(join(runDir, "debug.log"))
     : systemLogger;
