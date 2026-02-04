@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  cross-platform-analysis:
+    build: .
+    command:
+      [
+        "--mode",
+        "cross-platform-analysis",
+        "--coins",
+        "eth",
+        "--headless-summary"
+      ]
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      NODE_ENV: production
