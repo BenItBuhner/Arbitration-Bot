@@ -3,6 +3,7 @@
 import { watchMarketRoute } from "./src/routes/watch-market";
 import { fakeTradeRouteWithOptions } from "./src/routes/fake-trade";
 import { crossPlatformAnalysisRoute } from "./src/routes/cross-platform-analysis";
+import { priceDiffDetectionRoute } from "./src/routes/price-diff-detection";
 import { backtestRoute } from "./src/routes/backtest";
 import { selectOne } from "./src/cli/prompts";
 
@@ -16,7 +17,12 @@ function normalizeCoins(values: string[] | undefined): CoinSymbol[] | undefined 
   return out.length > 0 ? out : undefined;
 }
 
-type CLIMode = "fake-trade" | "watch-market" | "cross-platform-analysis" | "backtest";
+type CLIMode =
+  | "fake-trade"
+  | "watch-market"
+  | "cross-platform-analysis"
+  | "price-diff-detection"
+  | "backtest";
 type Provider = "polymarket" | "kalshi";
 
 interface CLIArgs {
@@ -33,15 +39,24 @@ interface CLIArgs {
   backtestMode?: "fast" | "visual";
   headless?: boolean;
   headlessSummary?: boolean;
+  realisticFill?: boolean;
+  fillUsd?: number;
   help?: boolean;
 }
 
 function normalizeMode(value: string | undefined): CLIMode | undefined {
   if (!value) return undefined;
   const normalized = value.toLowerCase().replace(/_/g, "-");
-  if (normalized === "fake-trade" || normalized === "fake") return "fake-trade";
+  if (
+    normalized === "fake-trade" ||
+    normalized === "fake" ||
+    normalized === "arbitrage" ||
+    normalized === "arb"
+  )
+    return "fake-trade";
   if (normalized === "watch-market" || normalized === "watch") return "watch-market";
   if (normalized === "cross-platform-analysis" || normalized === "cross-platform" || normalized === "outcome-analysis" || normalized === "analysis") return "cross-platform-analysis";
+  if (normalized === "price-diff-detection" || normalized === "price-diff" || normalized === "diff") return "price-diff-detection";
   if (normalized === "backtest" || normalized === "historical") return "backtest";
   return undefined;
 }
@@ -106,6 +121,11 @@ function parseArgs(argv: string[]): CLIArgs {
       continue;
     }
 
+    if (raw === "--price-diff-detection" || raw === "--price-diff" || raw === "--diff") {
+      args.mode = "price-diff-detection";
+      continue;
+    }
+
     if (raw === "--backtest") {
       args.mode = "backtest";
       continue;
@@ -133,6 +153,16 @@ function parseArgs(argv: string[]): CLIArgs {
     ) {
       args.headlessSummary = true;
       args.headless = true;
+      continue;
+    }
+
+    if (raw === "--realistic-fill") {
+      args.realisticFill = true;
+      continue;
+    }
+
+    if (raw === "--no-realistic-fill") {
+      args.realisticFill = false;
       continue;
     }
 
@@ -228,6 +258,25 @@ function parseArgs(argv: string[]): CLIArgs {
       continue;
     }
 
+    if (raw.startsWith("--fill-usd=")) {
+      const value = raw.slice("--fill-usd=".length).trim();
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        args.fillUsd = parsed;
+      }
+      continue;
+    }
+
+    if (raw === "--fill-usd") {
+      const value = (argv[i + 1] ?? "").trim();
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        args.fillUsd = parsed;
+      }
+      i += 1;
+      continue;
+    }
+
     if (raw.startsWith("--data-dir=")) {
       args.dataDir = raw.slice("--data-dir=".length).trim();
       continue;
@@ -288,20 +337,21 @@ function printUsage(): void {
   const lines = [
     "Usage:",
     "  bun run main.ts",
-    "  bun run main.ts -- --mode fake-trade --profiles calmTrader,aggresiveTrader --coins eth,btc",
+    "  bun run main.ts -- --mode fake-trade --profiles arbPaperV1 --coins eth,btc",
     "  bun run main.ts -- --mode fake-trade --auto",
     "  bun run main.ts -- --mode watch-market --market \"https://polymarket.com/event/...\"",
     "  bun run main.ts -- --mode cross-platform-analysis",
+    "  bun run main.ts -- --mode price-diff-detection",
     "  bun run main.ts -- --mode backtest --auto --data-dir backtest-data --speed max",
     "  bun run main.ts -- --mode backtest --auto --backtest-mode fast",
     "",
     "Flags:",
-    "  --mode <fake-trade|watch-market|cross-platform-analysis|backtest>",
-    "  --fake-trade | --watch-market | --cross-platform-analysis | --backtest",
-    "  --profiles <name1,name2>   (fake-trade)",
-    "  --coins <eth,btc,sol,xrp>  (fake-trade, cross-platform-analysis)",
-    "  --auto                     (fake-trade: select all profiles/coins)",
-    "  --provider <polymarket|kalshi> (fake-trade/watch-market)",
+    "  --mode <fake-trade|watch-market|cross-platform-analysis|price-diff-detection|backtest>",
+    "  --fake-trade | --watch-market | --cross-platform-analysis | --price-diff-detection | --backtest",
+    "  --profiles <name1,name2>   (arbitrage bot)",
+    "  --coins <eth,btc,sol,xrp>  (arbitrage bot, cross-platform-analysis, price-diff-detection)",
+    "  --auto                     (arbitrage bot: select all profiles/coins)",
+    "  --provider <polymarket|kalshi> (watch-market)",
     "  --kalshi | --polymarket    (provider shortcut)",
     "  --market <keyword|url>     (watch-market)",
     "  --data-dir <path>          (backtest)",
@@ -309,8 +359,11 @@ function printUsage(): void {
     "  --backtest-mode <fast|visual> (backtest)",
     "  --fast                    (backtest alias for fast)",
     "  --visual                  (backtest alias for visual)",
-    "  --headless                (backtest/fake-trade/cross-platform-analysis: disable dashboard UI)",
-    "  --headless-summary        (cross-platform-analysis: headless + concise summary logs)",
+    "  --headless                (backtest/arbitrage/cross-platform-analysis/price-diff-detection: disable dashboard UI)",
+    "  --headless-summary        (cross-platform-analysis/price-diff-detection: headless + concise summary logs)",
+    "  --realistic-fill          (price-diff-detection: book-walk fill simulation)",
+    "  --no-realistic-fill       (price-diff-detection: disable fill simulation)",
+    "  --fill-usd <amount>       (price-diff-detection: USD budget for fill simulation)",
     "  --start <iso|ms>           (backtest)",
     "  --end <iso|ms>             (backtest)",
     "  --help",
@@ -319,8 +372,9 @@ function printUsage(): void {
 }
 
 const menuChoices: Array<{ title: string; value: CLIMode }> = [
-  { title: "Start fake trading", value: "fake-trade" },
+  { title: "Start arbitrage bot (paper)", value: "fake-trade" },
   { title: "Start cross-platform outcome analyzation", value: "cross-platform-analysis" },
+  { title: "Price diff detection", value: "price-diff-detection" },
   { title: "Watch market", value: "watch-market" },
   { title: "Backtest (historical)", value: "backtest" },
 ];
@@ -347,7 +401,7 @@ const run = async () => {
       coins: cliArgs.coins,
       autoSelect: cliArgs.auto,
       provider: cliArgs.provider,
-      headless: cliArgs.headless,
+      headless: cliArgs.headless || cliArgs.headlessSummary,
     });
     return;
   }
@@ -362,6 +416,17 @@ const run = async () => {
       coins: normalizeCoins(cliArgs.coins),
       headless: cliArgs.headless,
       headlessSummary: cliArgs.headlessSummary,
+    });
+    return;
+  }
+
+  if (cliArgs.mode === "price-diff-detection") {
+    await priceDiffDetectionRoute({
+      coins: normalizeCoins(cliArgs.coins),
+      headless: cliArgs.headless,
+      headlessSummary: cliArgs.headlessSummary,
+      realisticFill: cliArgs.realisticFill,
+      fillUsd: cliArgs.fillUsd,
     });
     return;
   }
@@ -404,6 +469,14 @@ const run = async () => {
 
   if (selectedMode === "cross-platform-analysis") {
     await crossPlatformAnalysisRoute();
+    return;
+  }
+
+  if (selectedMode === "price-diff-detection") {
+    await priceDiffDetectionRoute({
+      realisticFill: cliArgs.realisticFill,
+      fillUsd: cliArgs.fillUsd,
+    });
     return;
   }
 

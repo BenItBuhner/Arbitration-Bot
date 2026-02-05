@@ -2,25 +2,24 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { MarketDataHub } from "../services/market-data-hub";
 import { KalshiMarketDataHub } from "../services/kalshi-market-data-hub";
-import {
-  ProfileEngine,
-  type TimedTradeConfig,
-} from "../services/profile-engine";
+import { ArbitrageEngine } from "../services/arbitrage-engine";
 import { RunLogger } from "../services/run-logger";
-import { ProfileDashboard } from "../cli/profile-dashboard";
+import { ArbitrageDashboard } from "../cli/arbitrage-dashboard";
 import type { CoinSymbol } from "../services/auto-market";
-import { promptText, selectMany, selectOne } from "../cli/prompts";
+import { promptText, selectMany } from "../cli/prompts";
 import {
   loadProviderConfig,
-  resolveProfileConfigForCoin,
   normalizeCoinKey,
   sanitizeProfileName,
-  type ProviderProfileDefinition,
   type KalshiCoinSelection,
 } from "../services/profile-config";
-import { resolveMarketProvider, type MarketProvider } from "../providers/provider";
-import { resolveMarketGroup, type MarketGroupDefinition } from "../services/market-groups";
+import {
+  loadArbitrageConfig,
+  type ArbitrageCoinConfig,
+} from "../services/arbitrage-config";
 import { getKalshiEnvConfig } from "../clients/kalshi/kalshi-config";
+import { KalshiClient } from "../clients/kalshi/kalshi-client";
+import { computeOddsMid } from "../services/cross-platform-compare";
 import {
   deriveSeriesTickerFromMarket,
   looksLikeKalshiMarketTicker,
@@ -28,11 +27,13 @@ import {
   parseKalshiMarketUrl,
 } from "../clients/kalshi/kalshi-url";
 
+const ODDS_HISTORY_LIMIT = 180;
+
 export interface FakeTradeRouteOptions {
   profiles?: string[];
   coins?: string[];
   autoSelect?: boolean;
-  provider?: MarketProvider;
+  provider?: string;
   headless?: boolean;
 }
 
@@ -164,10 +165,13 @@ function applyKalshiSelectorInput(
   selection.marketUrls = Array.from(new Set(selection.marketUrls));
 }
 
-function setupProfileNavigation(
-  profileCount: number,
-  getIndex: () => number,
-  setIndex: (nextIndex: number) => void,
+function setupProfileAndCoinNavigation(
+  getProfileCount: () => number,
+  getProfileIndex: () => number,
+  setProfileIndex: (nextIndex: number) => void,
+  getCoinCount: () => number,
+  getCoinIndex: () => number,
+  setCoinIndex: (nextIndex: number) => void,
 ): () => void {
   let keyBuffer = Buffer.alloc(0);
 
@@ -179,29 +183,41 @@ function setupProfileNavigation(
     ]);
 
     if (keyBuffer[0] == 0x1b) {
-    if (keyBuffer.length >= 3 && keyBuffer[1] == 0x5b) {
+      if (keyBuffer.length >= 3 && keyBuffer[1] == 0x5b) {
         if (keyBuffer[2] == 0x43) {
-          const next = (getIndex() + 1) % profileCount;
-          setIndex(next);
+          const coinCount = getCoinCount();
+          if (coinCount > 1) {
+            const next = (getCoinIndex() + 1) % coinCount;
+            setCoinIndex(next);
+          }
           keyBuffer = Buffer.alloc(0);
           return;
         }
         if (keyBuffer[2] == 0x44) {
-          const current = getIndex();
-          const next = current === 0 ? profileCount - 1 : current - 1;
-          setIndex(next);
+          const coinCount = getCoinCount();
+          if (coinCount > 1) {
+            const current = getCoinIndex();
+            const next = current === 0 ? coinCount - 1 : current - 1;
+            setCoinIndex(next);
+          }
           keyBuffer = Buffer.alloc(0);
           return;
         }
         if (keyBuffer[2] == 0x42) {
-          const next = Math.min(profileCount - 1, getIndex() + 1);
-          setIndex(next);
+          const profileCount = getProfileCount();
+          if (profileCount > 1) {
+            const next = Math.min(profileCount - 1, getProfileIndex() + 1);
+            setProfileIndex(next);
+          }
           keyBuffer = Buffer.alloc(0);
           return;
         }
         if (keyBuffer[2] == 0x41) {
-          const next = Math.max(0, getIndex() - 1);
-          setIndex(next);
+          const profileCount = getProfileCount();
+          if (profileCount > 1) {
+            const next = Math.max(0, getProfileIndex() - 1);
+            setProfileIndex(next);
+          }
           keyBuffer = Buffer.alloc(0);
           return;
         }
@@ -215,14 +231,20 @@ function setupProfileNavigation(
     keyBuffer = Buffer.alloc(0);
 
     if (keyStr.toLowerCase() === "w" || keyStr === "k") {
-      const next = Math.max(0, getIndex() - 1);
-      setIndex(next);
+      const profileCount = getProfileCount();
+      if (profileCount > 1) {
+        const next = Math.max(0, getProfileIndex() - 1);
+        setProfileIndex(next);
+      }
       return;
     }
 
     if (keyStr.toLowerCase() === "s" || keyStr === "j") {
-      const next = Math.min(profileCount - 1, getIndex() + 1);
-      setIndex(next);
+      const profileCount = getProfileCount();
+      if (profileCount > 1) {
+        const next = Math.min(profileCount - 1, getProfileIndex() + 1);
+        setProfileIndex(next);
+      }
       return;
     }
 
@@ -238,7 +260,7 @@ function setupProfileNavigation(
     }
   };
 
-  if (profileCount > 1) {
+  if ((getProfileCount() > 1 || getCoinCount() > 1) && process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.setEncoding("utf-8");
@@ -255,34 +277,27 @@ export async function fakeTradeRoute(): Promise<void> {
 export async function fakeTradeRouteWithOptions(
   options: FakeTradeRouteOptions = {},
 ): Promise<void> {
-  let provider: MarketProvider = options.provider ?? resolveMarketProvider();
-  const envProvider = process.env.MARKET_PROVIDER?.trim();
-  if (!envProvider && process.stdin.isTTY && !options.provider && !options.headless) {
-    const selected = await selectOne<MarketProvider>(
-      "Select provider",
-      [
-        { title: "Polymarket", value: "polymarket" },
-        { title: "Kalshi", value: "kalshi" },
-      ],
-      provider === "kalshi" ? 1 : 0,
+  if (options.provider) {
+    console.log(
+      "Provider selection is ignored for arbitrage mode (uses Polymarket + Kalshi).",
     );
-    if (!selected) {
-      console.log("No provider selected. Exiting.");
-      return;
-    }
-    provider = selected;
   }
 
-  let profiles: ProviderProfileDefinition[] = [];
+  let profiles: ReturnType<typeof loadArbitrageConfig>["profiles"] = [];
   let coinOptions: CoinSymbol[] = [];
-  let marketGroups: MarketGroupDefinition[] = [];
   let kalshiSelectorsByCoin: Map<CoinSymbol, KalshiCoinSelection> | undefined;
+  let polyCoinOptions: CoinSymbol[] = [];
+  let kalshiCoinOptions: CoinSymbol[] = [];
   try {
-    const loaded = loadProviderConfig(provider);
-    profiles = loaded.profiles;
-    coinOptions = loaded.coinOptions;
-    marketGroups = loaded.marketGroups;
-    kalshiSelectorsByCoin = loaded.kalshiSelectorsByCoin;
+    const arbLoaded = loadArbitrageConfig();
+    profiles = arbLoaded.profiles;
+    coinOptions = arbLoaded.coinOptions;
+
+    const polyLoaded = loadProviderConfig("polymarket");
+    const kalshiLoaded = loadProviderConfig("kalshi");
+    polyCoinOptions = polyLoaded.coinOptions;
+    kalshiCoinOptions = kalshiLoaded.coinOptions;
+    kalshiSelectorsByCoin = kalshiLoaded.kalshiSelectorsByCoin;
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to load config.json.";
@@ -290,7 +305,7 @@ export async function fakeTradeRouteWithOptions(
     return;
   }
   if (profiles.length == 0) {
-    console.log("No profiles found in config.json.");
+    console.log("No arbitrage profiles found in config.json.");
     return;
   }
 
@@ -343,9 +358,20 @@ export async function fakeTradeRouteWithOptions(
       return;
     }
   }
+  const resolvedProfiles = selectedProfiles ?? [];
 
   const fallbackCoins: CoinSymbol[] = ["eth", "btc", "sol", "xrp"];
-  const coinsToSelect = coinOptions.length > 0 ? coinOptions : fallbackCoins;
+  const polySet = new Set(polyCoinOptions);
+  const kalshiSet = new Set(kalshiCoinOptions);
+  const intersection = coinOptions.filter(
+    (coin) => polySet.has(coin) && kalshiSet.has(coin),
+  );
+  const coinsToSelect =
+    intersection.length > 0
+      ? intersection
+      : coinOptions.length > 0
+        ? coinOptions
+        : fallbackCoins;
   let selectedCoins: CoinSymbol[] | null = null;
 
   if (options.coins && options.coins.length > 0) {
@@ -398,81 +424,72 @@ export async function fakeTradeRouteWithOptions(
     console.log("No valid coins selected. Exiting.");
     return;
   }
+  const resolvedCoins = selectedCoins ?? [];
 
-  if (provider === "kalshi" && kalshiSelectorsByCoin) {
-    const canPromptSelectors = process.stdin.isTTY && !options.headless;
-    for (const coin of selectedCoins) {
-      const selection = ensureKalshiSelection(kalshiSelectorsByCoin, coin);
-      if (hasKalshiSelection(selection)) continue;
-      if (!canPromptSelectors) continue;
+  if (!kalshiSelectorsByCoin) {
+    kalshiSelectorsByCoin = new Map<CoinSymbol, KalshiCoinSelection>();
+  }
 
-      const response = await promptText(
-        `Enter Kalshi market URLs, tickers, or series for ${coin.toUpperCase()} (comma-separated). Prefix with series:/event:/market: to disambiguate, or leave blank to skip:`,
-      );
-      if (response && response.trim().length > 0) {
-        applyKalshiSelectorInput(selection, response);
-      }
+  const canPromptSelectors = process.stdin.isTTY && !options.headless;
+  for (const coin of resolvedCoins) {
+    const selection = ensureKalshiSelection(kalshiSelectorsByCoin, coin);
+    if (selection.autoDiscover !== false) continue;
+    if (hasKalshiSelection(selection)) continue;
+    if (!canPromptSelectors) continue;
+
+    const response = await promptText(
+      `Enter Kalshi market URLs, tickers, or series for ${coin.toUpperCase()} (comma-separated). Prefix with series:/event:/market: to disambiguate, or leave blank to skip:`,
+    );
+    if (response && response.trim().length > 0) {
+      applyKalshiSelectorInput(selection, response);
     }
-
-    const filteredCoins = selectedCoins.filter((coin) => {
-      const selection = kalshiSelectorsByCoin?.get(coin);
-      if (!hasKalshiSelection(selection)) {
-        console.log(
-          `No Kalshi market selectors configured for ${coin.toUpperCase()}, skipping.`,
-        );
-        return false;
-      }
-      return true;
-    });
-    if (filteredCoins.length === 0) {
-      console.log("No Kalshi coins have market selectors configured. Exiting.");
-      return;
-    }
-    selectedCoins = filteredCoins;
   }
 
   const { runDir, runId } = getNextRunDir();
-  const systemLogger = new RunLogger(join(runDir, "system.log"));
+  const systemLogger = new RunLogger(join(runDir, "system.log"), 200, {
+    stdout: options.headless === true,
+  });
+  const mismatchLogger = new RunLogger(join(runDir, "mismatch.log"), 200, {
+    stdout: options.headless === true,
+  });
 
-  let hub: MarketDataHub | KalshiMarketDataHub;
-  if (provider === "kalshi") {
-    if (!kalshiSelectorsByCoin) {
-      console.log("Kalshi market selectors are missing from config.json.");
-      return;
-    }
-    let kalshiConfig;
-    try {
-      kalshiConfig = getKalshiEnvConfig();
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Kalshi config error.";
-      console.log(message);
-      return;
-    }
-    hub = new KalshiMarketDataHub(
-      systemLogger,
-      kalshiConfig,
-      kalshiSelectorsByCoin,
-    );
-  } else {
-    hub = new MarketDataHub(systemLogger);
+  let kalshiConfig;
+  try {
+    kalshiConfig = getKalshiEnvConfig();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Kalshi config error.";
+    console.log(message);
+    return;
   }
 
-  await hub.start(selectedCoins);
+  const polyHub = new MarketDataHub(systemLogger, { requireCryptoPrice: false });
+  const kalshiHub = new KalshiMarketDataHub(
+    systemLogger,
+    kalshiConfig,
+    kalshiSelectorsByCoin,
+    { requireCryptoPrice: false },
+  );
 
-  const profileEngines: ProfileEngine[] = [];
+  await polyHub.start(resolvedCoins);
+  await kalshiHub.start(resolvedCoins);
+
+  const kalshiOutcomeClient = new KalshiClient(kalshiConfig);
+  const profileEngines: ArbitrageEngine[] = [];
+  const profileCoinsByName = new Map<string, CoinSymbol[]>();
+  const activeCoinIndexByProfile = new Map<string, number>();
   for (const profile of profiles) {
-    if (!selectedProfiles.includes(profile.name)) {
+    if (!resolvedProfiles.includes(profile.name)) {
       continue;
     }
 
-    const filtered = new Map<CoinSymbol, TimedTradeConfig>();
-    for (const coin of selectedCoins) {
-      const cfg = resolveProfileConfigForCoin(profile, coin, "default");
+    const filtered = new Map<CoinSymbol, ArbitrageCoinConfig>();
+    for (const coin of resolvedCoins) {
+      const cfg = profile.coins.get(coin);
       if (cfg) {
         filtered.set(coin, cfg);
       }
     }
+    const profileCoins = resolvedCoins.filter((coin) => filtered.has(coin));
 
     if (filtered.size === 0) {
       systemLogger.log(
@@ -483,98 +500,194 @@ export async function fakeTradeRouteWithOptions(
     }
 
     const profileLogName = `${sanitizeProfileName(profile.name)}.log`;
-    const profileLogger = new RunLogger(join(runDir, profileLogName));
+    const profileLogger = new RunLogger(join(runDir, profileLogName), 200, {
+      stdout: options.headless === true,
+    });
     profileEngines.push(
-      new ProfileEngine(profile.name, filtered, profileLogger, undefined, {
-        advancedSignals: true,
-        signalDebug: true,
-        configResolver: (coin, snapshot) => {
-          const groupId = resolveMarketGroup(provider, snapshot, marketGroups);
-          return resolveProfileConfigForCoin(profile, coin, groupId);
-        },
+      new ArbitrageEngine(profile.name, filtered, profileLogger, {
+        kalshiOutcomeClient,
+        mismatchLogger,
+        headlessSummary: options.headless === true,
       }),
     );
+    profileCoinsByName.set(profile.name, profileCoins);
+    if (!activeCoinIndexByProfile.has(profile.name)) {
+      activeCoinIndexByProfile.set(profile.name, 0);
+    }
+  }
+
+  const polyOddsHistoryByCoin = new Map<CoinSymbol, number[]>();
+  const kalshiOddsHistoryByCoin = new Map<CoinSymbol, number[]>();
+  for (const coin of resolvedCoins) {
+    polyOddsHistoryByCoin.set(coin, []);
+    kalshiOddsHistoryByCoin.set(coin, []);
   }
 
   if (profileEngines.length === 0) {
     systemLogger.log("No profiles eligible for selected coins.", "WARN");
-    hub.stop();
+    polyHub.stop();
+    kalshiHub.stop();
     return;
   }
 
-  const dashboard = options.headless ? null : new ProfileDashboard();
+  const dashboard = options.headless ? null : new ArbitrageDashboard();
   let activeProfileIndex = 0;
 
   const cleanupNavigation = dashboard
-    ? setupProfileNavigation(
-        profileEngines.length,
+    ? setupProfileAndCoinNavigation(
+        () => profileEngines.length,
         () => activeProfileIndex,
         (nextIndex) => {
-          activeProfileIndex = nextIndex;
+          if (profileEngines.length === 0) return;
+          const clamped = Math.max(
+            0,
+            Math.min(nextIndex, profileEngines.length - 1),
+          );
+          activeProfileIndex = clamped;
+          const profileName = profileEngines[activeProfileIndex]?.getName();
+          if (!profileName) return;
+          const coins = profileCoinsByName.get(profileName) ?? [];
+          const current = activeCoinIndexByProfile.get(profileName) ?? 0;
+          if (coins.length === 0) {
+            activeCoinIndexByProfile.set(profileName, 0);
+          } else if (current < 0 || current >= coins.length) {
+            activeCoinIndexByProfile.set(profileName, 0);
+          }
+        },
+        () => {
+          const profileName = profileEngines[activeProfileIndex]?.getName();
+          const coins = profileName ? profileCoinsByName.get(profileName) ?? [] : [];
+          return coins.length;
+        },
+        () => {
+          const profileName = profileEngines[activeProfileIndex]?.getName();
+          if (!profileName) return 0;
+          const coins = profileCoinsByName.get(profileName) ?? [];
+          const stored = activeCoinIndexByProfile.get(profileName) ?? 0;
+          if (coins.length === 0) return 0;
+          return Math.max(0, Math.min(stored, coins.length - 1));
+        },
+        (nextIndex) => {
+          const profileName = profileEngines[activeProfileIndex]?.getName();
+          if (!profileName) return;
+          const coins = profileCoinsByName.get(profileName) ?? [];
+          if (coins.length === 0) {
+            activeCoinIndexByProfile.set(profileName, 0);
+            return;
+          }
+          const clamped = Math.max(0, Math.min(nextIndex, coins.length - 1));
+          activeCoinIndexByProfile.set(profileName, clamped);
         },
       )
     : () => {};
 
   const renderTimer = setInterval(() => {
-    const snapshots = hub.getSnapshots();
-    for (const engine of profileEngines) {
-      engine.evaluate(snapshots, Date.now());
+    try {
+      const polySnapshots = polyHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub.getSnapshots();
+      for (const coin of resolvedCoins) {
+        const polySnap = polySnapshots.get(coin);
+        if (polySnap) {
+          const upTokenId = polySnap.upTokenId;
+          const bid = upTokenId ? polySnap.bestBid.get(upTokenId) ?? null : null;
+          const ask = upTokenId ? polySnap.bestAsk.get(upTokenId) ?? null : null;
+          const mid = computeOddsMid(bid ?? null, ask ?? null);
+          if (mid != null) {
+            const arr = polyOddsHistoryByCoin.get(coin);
+            if (arr) {
+              arr.push(mid);
+              if (arr.length > ODDS_HISTORY_LIMIT) arr.shift();
+            }
+          }
+        }
+
+        const kalshiSnap = kalshiSnapshots.get(coin);
+        if (kalshiSnap) {
+          const arr = kalshiOddsHistoryByCoin.get(coin);
+          if (arr) {
+            if (
+              arr.length === 0 &&
+              kalshiSnap.kalshiMarketPriceHistory &&
+              kalshiSnap.kalshiMarketPriceHistory.length > 0
+            ) {
+              arr.push(
+                ...kalshiSnap.kalshiMarketPriceHistory.slice(-ODDS_HISTORY_LIMIT),
+              );
+            }
+            const odds =
+              kalshiSnap.kalshiMarketPrice ?? kalshiSnap.kalshiLastPrice ?? null;
+            if (odds != null) {
+              const last = arr[arr.length - 1];
+              if (last !== odds) {
+                arr.push(odds);
+                if (arr.length > ODDS_HISTORY_LIMIT) arr.shift();
+              }
+            }
+          }
+        }
+      }
+      for (const engine of profileEngines) {
+        engine.evaluate(polySnapshots, kalshiSnapshots, Date.now());
+      }
+
+      if (!dashboard) {
+        return;
+      }
+
+      const profileViews = profileEngines.map((engine) => ({
+        name: engine.getName(),
+        summary: engine.getSummary(),
+        markets: engine.getMarketViews(),
+        logs: engine.getLogs(),
+        pnlHistory: engine.getPnlHistory(),
+      }));
+
+      const activeProfile = profileViews[activeProfileIndex];
+      if (!activeProfile) {
+        return;
+      }
+
+      const activeProfileName = activeProfile.name;
+      const profileCoins = profileCoinsByName.get(activeProfileName) ?? [];
+      const storedIndex = activeCoinIndexByProfile.get(activeProfileName) ?? 0;
+      const safeIndex =
+        profileCoins.length > 0
+          ? Math.max(0, Math.min(storedIndex, profileCoins.length - 1))
+          : 0;
+      if (storedIndex !== safeIndex) {
+        activeCoinIndexByProfile.set(activeProfileName, safeIndex);
+      }
+      const activeCoin =
+        profileCoins[safeIndex] ??
+        activeProfile.markets[0]?.coin ??
+        resolvedCoins[0] ??
+        null;
+
+      dashboard.update({
+        runId,
+        modeLabel: "Arbitrage Bot (paper)",
+        activeProfileIndex,
+        profiles: profileViews,
+        coins: profileCoins,
+        activeCoinIndex: safeIndex,
+        activeCoin,
+        polySnapshots,
+        kalshiSnapshots,
+        polyOddsHistoryByCoin,
+        kalshiOddsHistoryByCoin,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown error in loop.";
+      systemLogger.log(`Arbitrage loop error: ${message}`, "ERROR");
     }
-
-    if (!dashboard) {
-      return;
-    }
-
-    const profileViews = profileEngines.map((engine) => ({
-      name: engine.getName(),
-      summary: engine.getSummary(),
-      markets: engine.getMarketViews(),
-      logs: engine.getLogs(),
-      pnlHistory: engine.getPnlHistory(),
-    }));
-
-    const activeProfile = profileViews[activeProfileIndex];
-    if (!activeProfile) {
-      return;
-    }
-    const activeCoin =
-      activeProfile.markets.length > 0
-        ? activeProfile.markets[0]?.coin ?? null
-        : selectedCoins[0] || null;
-    const snap = activeCoin ? snapshots.get(activeCoin) : undefined;
-    const isKalshi = snap?.provider === "kalshi";
-    const usingMarketHistory = Boolean(
-      isKalshi && snap?.kalshiMarketPriceHistory?.length,
-    );
-    const activeCoinHistory =
-      activeCoin && snap
-        ? usingMarketHistory
-          ? snap.kalshiMarketPriceHistory
-          : snap.priceHistory || []
-        : [];
-    const activeCoinPriceLabel = isKalshi
-      ? usingMarketHistory
-        ? "Market Price (odds)"
-        : "Spot Price (fallback)"
-      : activeCoin
-        ? `Spot Price (${activeCoin.toUpperCase()})`
-        : "Spot Price";
-
-    dashboard.update({
-      runId,
-      activeProfileIndex,
-      profiles: profileViews,
-      activeCoin,
-      activeCoinPriceHistory: activeCoinHistory ?? [],
-      activeCoinPriceLabel,
-      useCandleGraph: true,
-    });
   }, 250);
 
   process.on("SIGINT", () => {
     clearInterval(renderTimer);
     cleanupNavigation();
-    hub.stop();
+    polyHub.stop();
+    kalshiHub.stop();
     process.exit(0);
   });
 }

@@ -65,10 +65,27 @@ function renderSideBySide(
   return lines.join("\n");
 }
 
+function renderCoinTabs(coins: CoinSymbol[], activeIndex: number): string {
+  if (coins.length === 0) {
+    return `${colors.dim}Coins: none${colors.reset}\n`;
+  }
+  const tabs = coins
+    .map((coin, index) => {
+      const isActive = index === activeIndex;
+      const color = isActive ? colors.bright + colors.cyan : colors.dim;
+      return `${color}[${coin.toUpperCase()}]${colors.reset}`;
+    })
+    .join(" ");
+  return `${tabs}\n`;
+}
+
 export interface CrossPlatformDashboardState {
   polySnapshots: Map<CoinSymbol, MarketSnapshot>;
   kalshiSnapshots: Map<CoinSymbol, MarketSnapshot>;
   coins: CoinSymbol[];
+  activeCoin: CoinSymbol;
+  activeCoinIndex: number;
+  coinCount: number;
   accuracyByCoin: Map<CoinSymbol, AccuracyState>;
   polyOddsHistoryByCoin: Map<CoinSymbol, number[]>;
   kalshiOddsHistoryByCoin: Map<CoinSymbol, number[]>;
@@ -109,7 +126,7 @@ export class CrossPlatformDashboard {
 
   private render(state: CrossPlatformDashboardState): void {
     const { coins } = state;
-    const activeCoin = coins[0] ?? null;
+    const activeCoin = state.activeCoin ?? coins[0] ?? null;
     if (!activeCoin) {
       process.stdout.write(
         `${colors.dim}No coins selected for cross-platform analysis.${colors.reset}\n`,
@@ -129,6 +146,10 @@ export class CrossPlatformDashboard {
     let out = "\x1b[2J\x1b[H";
     const runtimeSec = (Date.now() - this.startTime) / 1000;
     out += `${colors.bright}${colors.cyan}Cross-Platform Outcome Analysis${colors.reset} ${colors.dim}(${activeCoin.toUpperCase()}) | Runtime: ${runtimeSec.toFixed(1)}s${colors.reset}\n`;
+    out += renderCoinTabs(coins, state.activeCoinIndex);
+    if (state.coinCount > 1) {
+      out += `${colors.dim}Coin: ${activeCoin.toUpperCase()} (${state.activeCoinIndex + 1}/${state.coinCount}) | Left/Right to switch coins${colors.reset}\n`;
+    }
     out += `${colors.dim}${"-".repeat(80)}${colors.reset}\n`;
 
     const polySpotHistory = polySnap?.priceHistory ?? [];

@@ -377,6 +377,10 @@ function buildOrderBookSnapshot(
   return { bids, asks, lastTrade, totalBidValue, totalAskValue };
 }
 
+export interface KalshiMarketDataHubOptions {
+  requireCryptoPrice?: boolean;
+}
+
 export class KalshiMarketDataHub {
   private logger: RunLogger;
   private kalshiClient: KalshiClient;
@@ -386,14 +390,17 @@ export class KalshiMarketDataHub {
   private tickerToCoin: Map<string, CoinSymbol> = new Map();
   private evaluationTimer: NodeJS.Timeout | null = null;
   private kalshiFeedFallbackLogged = new Set<CoinSymbol>();
+  private requireCryptoPrice: boolean;
 
   constructor(
     logger: RunLogger,
     private kalshiConfig: KalshiEnvConfig,
     private selectorsByCoin: Map<CoinSymbol, KalshiCoinSelection>,
+    options: KalshiMarketDataHubOptions = {},
   ) {
     this.logger = logger;
     this.kalshiClient = new KalshiClient(kalshiConfig);
+    this.requireCryptoPrice = options.requireCryptoPrice !== false;
   }
 
   async start(coins: CoinSymbol[]): Promise<void> {
@@ -1234,10 +1241,11 @@ export class KalshiMarketDataHub {
   private updateDataStatus(state: KalshiMarketState, now: number): void {
     const bookFresh = now - state.lastBookUpdateMs <= BOOK_STALE_MS;
     const priceFresh = now - state.lastCryptoUpdateMs <= PRICE_STALE_MS;
+    const effectivePriceFresh = this.requireCryptoPrice ? priceFresh : true;
     const hasAnyData = state.lastBookUpdateMs > 0 || state.lastCryptoUpdateMs > 0;
 
     let nextStatus: KalshiMarketState["dataStatus"] = "unknown";
-    if (bookFresh && priceFresh) {
+    if (bookFresh && effectivePriceFresh) {
       nextStatus = "healthy";
     } else if (!hasAnyData && now - state.selectedAtMs < DATA_STARTUP_GRACE_MS) {
       nextStatus = "unknown";

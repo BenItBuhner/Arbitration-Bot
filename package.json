@@ -11,6 +11,7 @@
     "trading-bot": "bun run exp/example-usage.ts trading-bot",
     "alert": "bun run exp/example-usage.ts alert",
     "multi": "bun run exp/example-usage.ts multi",
+    "lint": "bunx tsc --noEmit",
     "test": "bun test"
   },
   "devDependencies": {

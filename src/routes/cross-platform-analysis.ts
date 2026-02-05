@@ -8,7 +8,7 @@ import { join } from "path";
 import { MarketDataHub, type MarketSnapshot } from "../services/market-data-hub";
 import { KalshiMarketDataHub } from "../services/kalshi-market-data-hub";
 import { RunLogger } from "../services/run-logger";
-import { loadProviderConfig } from "../services/profile-config";
+import { loadProviderConfig, normalizeCoinKey } from "../services/profile-config";
 import { getKalshiEnvConfig } from "../clients/kalshi/kalshi-config";
 import { KalshiClient } from "../clients/kalshi/kalshi-client";
 import type { CoinSymbol } from "../services/auto-market";
@@ -17,12 +17,20 @@ import {
   computeOddsMid,
   createAccuracyState,
   updateAccuracy,
-  normalizeOutcomeLabel,
   type NormalizedOutcome,
   type AccuracyState,
 } from "../services/cross-platform-compare";
 import { CrossPlatformDashboard } from "../cli/cross-platform-dashboard";
-import { extractOutcomes, getMarketBySlug } from "../services/market-service";
+import { setupCoinNavigation } from "../cli/coin-navigation";
+import { selectMany } from "../cli/prompts";
+import {
+  computeFinalPrice,
+  computeOutcomeFromValues,
+  fetchKalshiOfficialOutcome,
+  fetchPolymarketOfficialOutcome,
+  resolveCloseTimeMs,
+  resolveThreshold,
+} from "../services/outcome-resolution";
 
 const ODDS_HISTORY_LIMIT = 180;
 const RENDER_INTERVAL_MS = 500;
@@ -36,6 +44,11 @@ const OFFICIAL_MAX_WAIT_MS = parseEnvNumber(
   5_000,
 );
 const FINAL_STALE_AFTER_MS = Math.min(FINAL_GRACE_MS, OFFICIAL_MAX_WAIT_MS);
+const FINAL_PRICE_OPTIONS = {
+  windowMs: FINAL_WINDOW_MS,
+  minPoints: FINAL_MIN_POINTS,
+  allowStaleAfterMs: FINAL_STALE_AFTER_MS,
+};
 const MATCH_TIME_TOLERANCE_MS = parseEnvNumber(
   "CROSS_ANALYSIS_MATCH_TIME_TOLERANCE_MS",
   120_000,
@@ -118,123 +131,9 @@ function formatIso(ms: number | null | undefined): string {
   return new Date(ms).toISOString();
 }
 
-function parseNumeric(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const cleaned = value.replace(/[$,%]/g, "").replace(/,/g, "").trim();
-    if (!cleaned) return null;
-    const parsed = Number(cleaned);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return parseNumeric(record.value ?? record.display_value ?? record.close ?? record.open);
-  }
-  return null;
-}
-
-function findNumericByKeys(
-  record: Record<string, unknown>,
-  keys: string[],
-): { value: number | null; key: string | null } {
-  for (const key of keys) {
-    if (!(key in record)) continue;
-    const parsed = parseNumeric(record[key]);
-    if (parsed !== null && Number.isFinite(parsed)) {
-      return { value: parsed, key };
-    }
-  }
-  return { value: null, key: null };
-}
-
-function normalizeOutcomeValue(
-  value: unknown,
-  outcomes?: string[],
-): NormalizedOutcome | null {
-  if (typeof value === "string") {
-    const normalized = normalizeOutcomeLabel(value);
-    return normalized === "UNKNOWN" ? null : normalized;
-  }
-  if (typeof value === "boolean") {
-    return value ? "UP" : "DOWN";
-  }
-  if (typeof value === "number" && outcomes && outcomes.length > 0) {
-    const idx = Math.round(value);
-    if (idx >= 0 && idx < outcomes.length) {
-      const normalized = normalizeOutcomeLabel(outcomes[idx] ?? "");
-      return normalized === "UNKNOWN" ? null : normalized;
-    }
-  }
-  return null;
-}
-
-function parseOutcomePrices(value: unknown): number[] | null {
-  if (!value) return null;
-  if (Array.isArray(value)) {
-    const parsed = value.map((v) => parseNumeric(v)).filter((v) => v != null) as number[];
-    return parsed.length > 0 ? parsed : null;
-  }
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) {
-        const nums = parsed.map((v) => parseNumeric(v)).filter((v) => v != null) as number[];
-        return nums.length > 0 ? nums : null;
-      }
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 function tail(values: number[] | undefined, limit: number): number[] {
   if (!values || values.length === 0) return [];
   return values.length <= limit ? values.slice() : values.slice(-limit);
-}
-
-function resolveThreshold(snapshot: MarketSnapshot): {
-  value: number | null;
-  source: string;
-} {
-  if (snapshot.priceToBeat > 0) {
-    return { value: snapshot.priceToBeat, source: "price_to_beat" };
-  }
-  if (snapshot.referencePrice > 0) {
-    return { value: snapshot.referencePrice, source: snapshot.referenceSource };
-  }
-  const labelCandidates = [snapshot.upOutcome, snapshot.downOutcome];
-  for (const label of labelCandidates) {
-    if (!label) continue;
-    const lower = label.toLowerCase();
-    if (!lower.includes("price to beat")) continue;
-    const parsed = parseNumeric(label);
-    if (parsed !== null && parsed > 0) {
-      return { value: parsed, source: "label" };
-    }
-  }
-  return { value: null, source: snapshot.referenceSource ?? "missing" };
-}
-
-function resolveCloseTimeMs(
-  snapshot: MarketSnapshot,
-  now: number,
-): number | null {
-  if (
-    snapshot.marketCloseTimeMs !== null &&
-    snapshot.marketCloseTimeMs !== undefined &&
-    Number.isFinite(snapshot.marketCloseTimeMs)
-  ) {
-    return snapshot.marketCloseTimeMs;
-  }
-  if (
-    snapshot.timeLeftSec !== null &&
-    snapshot.timeLeftSec !== undefined &&
-    Number.isFinite(snapshot.timeLeftSec)
-  ) {
-    return now + snapshot.timeLeftSec * 1000;
-  }
-  return null;
 }
 
 function resolveSlotStartMs(
@@ -256,256 +155,6 @@ function resolveSlotStartMs(
 function computeAgeMs(value: number | null | undefined, now: number): number | null {
   if (!value || !Number.isFinite(value) || value <= 0) return null;
   return Math.max(0, now - value);
-}
-
-function computeFinalPrice(
-  snapshot: MarketSnapshot,
-  now: number,
-  allowStaleAfterMs: number,
-): {
-  value: number | null;
-  source: string;
-  points: number;
-  coverageMs: number | null;
-  windowMs: number;
-} {
-  const closeTimeMs = resolveCloseTimeMs(snapshot, now);
-  const allowStale =
-    closeTimeMs === null ? true : now - closeTimeMs > allowStaleAfterMs;
-
-  if (
-    snapshot.provider === "kalshi" &&
-    snapshot.kalshiUnderlyingValue != null &&
-    Number.isFinite(snapshot.kalshiUnderlyingValue) &&
-    snapshot.kalshiUnderlyingValue > 0
-  ) {
-    const ts = snapshot.kalshiUnderlyingTs ?? null;
-    const withinWindow =
-      closeTimeMs !== null && ts !== null
-        ? Math.abs(closeTimeMs - ts) <= FINAL_WINDOW_MS
-        : false;
-    if (withinWindow || allowStale || closeTimeMs === null) {
-      return {
-        value: snapshot.kalshiUnderlyingValue,
-        source: withinWindow ? "kalshi_underlying" : "kalshi_underlying_stale",
-        points: 1,
-        coverageMs: null,
-        windowMs: FINAL_WINDOW_MS,
-      };
-    }
-  }
-
-  if (closeTimeMs !== null && snapshot.priceHistoryWithTs) {
-    const windowStart = closeTimeMs - FINAL_WINDOW_MS;
-    const points = snapshot.priceHistoryWithTs.filter(
-      (p) => p.ts >= windowStart && p.ts <= closeTimeMs,
-    );
-    if (points.length >= FINAL_MIN_POINTS) {
-      const first = points[0];
-      const last = points[points.length - 1];
-      if (!first || !last) {
-        return {
-          value: null,
-          source: "pending_final_price",
-          points: 0,
-          coverageMs: null,
-          windowMs: FINAL_WINDOW_MS,
-        };
-      }
-      const sum = points.reduce((acc, p) => acc + p.price, 0);
-      const avg = sum / points.length;
-      const coverage = last.ts - first.ts;
-      return {
-        value: avg,
-        source: "spot_avg_window",
-        points: points.length,
-        coverageMs: coverage,
-        windowMs: FINAL_WINDOW_MS,
-      };
-    }
-  }
-
-  if (closeTimeMs !== null && !allowStale) {
-    return {
-      value: null,
-      source: "pending_final_price",
-      points: 0,
-      coverageMs: null,
-      windowMs: FINAL_WINDOW_MS,
-    };
-  }
-
-  const spot = snapshot.cryptoPrice > 0 ? snapshot.cryptoPrice : null;
-  if (spot != null) {
-    return {
-      value: spot,
-      source: allowStale ? "spot_last_stale" : "spot_last",
-      points: 1,
-      coverageMs: null,
-      windowMs: FINAL_WINDOW_MS,
-    };
-  }
-
-  return {
-    value: null,
-    source: "missing",
-    points: 0,
-    coverageMs: null,
-    windowMs: FINAL_WINDOW_MS,
-  };
-}
-
-function computeOutcomeFromValues(
-  price: number | null,
-  threshold: number | null,
-): NormalizedOutcome {
-  if (
-    price === null ||
-    threshold === null ||
-    !Number.isFinite(price) ||
-    !Number.isFinite(threshold) ||
-    threshold <= 0
-  ) {
-    return "UNKNOWN";
-  }
-  return price >= threshold ? "UP" : "DOWN";
-}
-
-interface OfficialOutcomeResult {
-  outcome: NormalizedOutcome | null;
-  outcomeSource: string | null;
-  finalPrice: number | null;
-  finalPriceSource: string | null;
-}
-
-async function fetchPolymarketOfficialOutcome(
-  slug: string,
-): Promise<OfficialOutcomeResult> {
-  const market = await getMarketBySlug(slug);
-  if (!market) {
-    return { outcome: null, outcomeSource: null, finalPrice: null, finalPriceSource: null };
-  }
-  const record = market as unknown as Record<string, unknown>;
-  const outcomes = extractOutcomes(market);
-
-  const outcomeKeys = [
-    "resolution",
-    "resolvedOutcome",
-    "resolved_outcome",
-    "result",
-    "winningOutcome",
-    "winning_outcome",
-    "finalOutcome",
-    "final_outcome",
-    "outcome",
-    "answer",
-  ];
-  let outcome: NormalizedOutcome | null = null;
-  let outcomeSource: string | null = null;
-  for (const key of outcomeKeys) {
-    if (!(key in record)) continue;
-    const candidate = normalizeOutcomeValue(record[key], outcomes);
-    if (candidate) {
-      outcome = candidate;
-      outcomeSource = key;
-      break;
-    }
-  }
-
-  if (!outcome) {
-    const prices = parseOutcomePrices(record.outcomePrices ?? record.outcome_prices);
-    if (prices && outcomes.length === prices.length) {
-      let maxIdx = 0;
-      let maxVal = prices[0] ?? 0;
-      for (let i = 1; i < prices.length; i += 1) {
-        if ((prices[i] ?? 0) > maxVal) {
-          maxVal = prices[i] ?? 0;
-          maxIdx = i;
-        }
-      }
-      if (maxVal >= 0.95) {
-        const candidate = normalizeOutcomeValue(maxIdx, outcomes);
-        if (candidate) {
-          outcome = candidate;
-          outcomeSource = "outcomePrices";
-        }
-      }
-    }
-  }
-
-  const priceKeys = [
-    "finalPrice",
-    "final_price",
-    "settlement_price",
-    "settlementPrice",
-    "final_value",
-    "finalValue",
-    "settlement_value",
-    "resolution_price",
-    "close_price",
-    "closing_price",
-  ];
-  const numeric = findNumericByKeys(record, priceKeys);
-  return {
-    outcome,
-    outcomeSource,
-    finalPrice: numeric.value,
-    finalPriceSource: numeric.key,
-  };
-}
-
-async function fetchKalshiOfficialOutcome(
-  client: KalshiClient,
-  ticker: string,
-): Promise<OfficialOutcomeResult> {
-  const market = await client.getMarket(ticker);
-  if (!market) {
-    return { outcome: null, outcomeSource: null, finalPrice: null, finalPriceSource: null };
-  }
-  const record = market as Record<string, unknown>;
-
-  const outcomeKeys = [
-    "result",
-    "market_result",
-    "settlement_result",
-    "final_result",
-    "resolution",
-    "resolved_outcome",
-    "settled_outcome",
-    "outcome",
-  ];
-  let outcome: NormalizedOutcome | null = null;
-  let outcomeSource: string | null = null;
-  for (const key of outcomeKeys) {
-    if (!(key in record)) continue;
-    const candidate = normalizeOutcomeValue(record[key], ["Yes", "No"]);
-    if (candidate) {
-      outcome = candidate;
-      outcomeSource = key;
-      break;
-    }
-  }
-
-  const priceKeys = [
-    "settlement_price",
-    "settlement_price_dollars",
-    "settlement_price_cents",
-    "final_price",
-    "final_price_dollars",
-    "final_price_cents",
-    "settlement_value",
-    "final_value",
-    "resolution_price",
-    "close_price",
-    "closing_price",
-  ];
-  const numeric = findNumericByKeys(record, priceKeys);
-  return {
-    outcome,
-    outcomeSource,
-    finalPrice: numeric.value,
-    finalPriceSource: numeric.key,
-  };
 }
 
 function getOrderBookSummary(snapshot: MarketSnapshot, tokenId?: string | null): {
@@ -619,16 +268,41 @@ export async function crossPlatformAnalysisRoute(
 ): Promise<void> {
   const polyConfig = loadProviderConfig("polymarket");
   const kalshiConfigResult = loadProviderConfig("kalshi");
-  const coins: CoinSymbol[] =
-    (options.coins?.length ?? 0) > 0
-      ? options.coins!.filter(
-          (c) =>
-            polyConfig.coinOptions.includes(c) &&
-            kalshiConfigResult.coinOptions.includes(c),
-        )
-      : polyConfig.coinOptions.filter((c) =>
-          kalshiConfigResult.coinOptions.includes(c),
-        );
+  const summaryOnly = options.headlessSummary === true;
+  const headless = options.headless || summaryOnly;
+  const availableCoins = polyConfig.coinOptions.filter((c) =>
+    kalshiConfigResult.coinOptions.includes(c),
+  );
+  let coins: CoinSymbol[] = [];
+
+  if (options.coins && options.coins.length > 0) {
+    coins = options.coins.filter((c) => availableCoins.includes(c));
+    if (coins.length === 0) {
+      console.log("No valid coins matched --coins.");
+      return;
+    }
+  } else if (process.stdin.isTTY && !headless) {
+    const selectedCoinsRaw = await selectMany(
+      "Select coins",
+      availableCoins.map((coin) => ({
+        title: coin.toUpperCase(),
+        value: coin.toUpperCase(),
+      })),
+    );
+    if (selectedCoinsRaw.length === 0) {
+      console.log("No coins selected. Exiting.");
+      return;
+    }
+    coins = selectedCoinsRaw
+      .map((coin) => normalizeCoinKey(coin))
+      .filter((coin): coin is CoinSymbol => !!coin);
+    if (coins.length === 0) {
+      console.log("No valid coins selected. Exiting.");
+      return;
+    }
+  } else {
+    coins = availableCoins;
+  }
 
   if (coins.length === 0) {
     console.log(
@@ -659,8 +333,6 @@ export async function crossPlatformAnalysisRoute(
     mkdirSync(logsRoot, { recursive: true });
   }
   const { runDir, runId } = getNextRunDir(logsRoot);
-  const summaryOnly = options.headlessSummary === true;
-  const headless = options.headless || summaryOnly;
   const systemLogger = new RunLogger(join(runDir, "system.log"), 200, {
     stdout: summaryOnly,
   });
@@ -710,6 +382,16 @@ export async function crossPlatformAnalysisRoute(
   }
 
   const dashboard = headless ? null : new CrossPlatformDashboard();
+  let activeCoinIndex = 0;
+  const cleanupNavigation = dashboard
+    ? setupCoinNavigation(
+        coins.length,
+        () => activeCoinIndex,
+        (next) => {
+          activeCoinIndex = next;
+        },
+      )
+    : () => {};
 
   const timer = setInterval(() => {
     try {
@@ -749,10 +431,10 @@ export async function crossPlatformAnalysisRoute(
         entry.kalshiCloseThreshold ?? resolveThreshold(entry.kalshiSnap).value;
       const polyPrice =
         entry.polyClosePrice ??
-        computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).value;
+        computeFinalPrice(entry.polySnap, now, FINAL_PRICE_OPTIONS).value;
       const kalshiPrice =
         entry.kalshiClosePrice ??
-        computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).value;
+        computeFinalPrice(entry.kalshiSnap, now, FINAL_PRICE_OPTIONS).value;
 
       const polyUpBook = getOrderBookSummary(
         entry.polySnap,
@@ -820,34 +502,34 @@ export async function crossPlatformAnalysisRoute(
           entry.polyCloseThresholdSource ?? resolveThreshold(entry.polySnap).source,
         polyFinalPricePoints:
           entry.polyClosePricePoints ??
-          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).points,
+          computeFinalPrice(entry.polySnap, now, FINAL_PRICE_OPTIONS).points,
         polyFinalPriceCoverageMs:
           entry.polyClosePriceCoverageMs ??
-          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).coverageMs,
+          computeFinalPrice(entry.polySnap, now, FINAL_PRICE_OPTIONS).coverageMs,
         polyFinalPriceWindowMs:
           entry.polyClosePriceWindowMs ??
-          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).windowMs,
+          computeFinalPrice(entry.polySnap, now, FINAL_PRICE_OPTIONS).windowMs,
         kalshiThreshold,
         kalshiThresholdSource:
           entry.kalshiCloseThresholdSource ??
           resolveThreshold(entry.kalshiSnap).source,
         kalshiFinalPricePoints:
           entry.kalshiClosePricePoints ??
-          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).points,
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_PRICE_OPTIONS).points,
         kalshiFinalPriceCoverageMs:
           entry.kalshiClosePriceCoverageMs ??
-          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).coverageMs,
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_PRICE_OPTIONS).coverageMs,
         kalshiFinalPriceWindowMs:
           entry.kalshiClosePriceWindowMs ??
-          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).windowMs,
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_PRICE_OPTIONS).windowMs,
         polyPriceUsed: polyPrice,
         polyPriceSource:
           entry.polyClosePriceSource ??
-          computeFinalPrice(entry.polySnap, now, FINAL_STALE_AFTER_MS).source,
+          computeFinalPrice(entry.polySnap, now, FINAL_PRICE_OPTIONS).source,
         kalshiPriceUsed: kalshiPrice,
         kalshiPriceSource:
           entry.kalshiClosePriceSource ??
-          computeFinalPrice(entry.kalshiSnap, now, FINAL_STALE_AFTER_MS).source,
+          computeFinalPrice(entry.kalshiSnap, now, FINAL_PRICE_OPTIONS).source,
         polyPriceDelta:
           polyPrice != null && polyThreshold != null ? polyPrice - polyThreshold : null,
         polyPriceDeltaPct:
@@ -951,7 +633,7 @@ export async function crossPlatformAnalysisRoute(
         const finalPrice = computeFinalPrice(
           entry.polySnap,
           now,
-          FINAL_STALE_AFTER_MS,
+          FINAL_PRICE_OPTIONS,
         );
         const polyCloseTimeMs = resolveCloseTimeMs(entry.polySnap, now);
         const polyAttempts = entry.polyOfficialFetchAttempts ?? 0;
@@ -986,7 +668,7 @@ export async function crossPlatformAnalysisRoute(
         const finalPrice = computeFinalPrice(
           entry.kalshiSnap,
           now,
-          FINAL_STALE_AFTER_MS,
+          FINAL_PRICE_OPTIONS,
         );
         const kalshiCloseTimeMs = resolveCloseTimeMs(entry.kalshiSnap, now);
         const kalshiAttempts = entry.kalshiOfficialFetchAttempts ?? 0;
@@ -1433,10 +1115,15 @@ export async function crossPlatformAnalysisRoute(
     }
 
       if (dashboard) {
+        const activeCoin =
+          coins[activeCoinIndex] ?? coins[0] ?? ("eth" as CoinSymbol);
         dashboard.update({
           polySnapshots,
           kalshiSnapshots,
           coins,
+          activeCoin,
+          activeCoinIndex,
+          coinCount: coins.length,
           accuracyByCoin,
           polyOddsHistoryByCoin,
           kalshiOddsHistoryByCoin,
@@ -1451,6 +1138,7 @@ export async function crossPlatformAnalysisRoute(
 
   process.on("SIGINT", () => {
     clearInterval(timer);
+    cleanupNavigation();
     polyHub.stop();
     kalshiHub.stop();
     process.exit(0);

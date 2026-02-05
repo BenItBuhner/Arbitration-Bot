@@ -185,6 +185,10 @@ interface PendingMarketState {
   lastAttemptMs: number;
 }
 
+export interface MarketDataHubOptions {
+  requireCryptoPrice?: boolean;
+}
+
 export class MarketDataHub {
   private logger: RunLogger;
   private marketWs: MarketWS | null = null;
@@ -196,9 +200,11 @@ export class MarketDataHub {
   private lastCryptoWsResetMs = 0;
   private rotatingCoins: Set<CoinSymbol> = new Set();
   private pendingMarkets: Map<CoinSymbol, PendingMarketState> = new Map();
+  private requireCryptoPrice: boolean;
 
-  constructor(logger: RunLogger) {
+  constructor(logger: RunLogger, options: MarketDataHubOptions = {}) {
     this.logger = logger;
+    this.requireCryptoPrice = options.requireCryptoPrice !== false;
   }
 
   async start(coins: CoinSymbol[]): Promise<void> {
@@ -585,10 +591,11 @@ export class MarketDataHub {
   private updateDataStatus(state: MarketDataState, now: number): void {
     const bookFresh = this.isBookFresh(state, now);
     const priceFresh = this.isCryptoFresh(state, now);
+    const effectivePriceFresh = this.requireCryptoPrice ? priceFresh : true;
     const hasAnyData =
       state.lastBookUpdateMs > 0 || state.lastCryptoUpdateMs > 0;
     let nextStatus: MarketDataState["dataStatus"] = "unknown";
-    if (bookFresh && priceFresh) {
+    if (bookFresh && effectivePriceFresh) {
       nextStatus = "healthy";
     } else if (
       !hasAnyData &&
@@ -603,8 +610,9 @@ export class MarketDataHub {
       state.dataStatus = nextStatus;
       state.lastDataStatusMs = now;
       if (nextStatus === "healthy") {
+        const label = this.requireCryptoPrice ? "book + price" : "book";
         this.logger.log(
-          `DATA: ${state.coin.toUpperCase()} data active (book + price)`,
+          `DATA: ${state.coin.toUpperCase()} data active (${label})`,
         );
       } else if (nextStatus === "stale") {
         const reasons: string[] = [];
@@ -613,7 +621,7 @@ export class MarketDataHub {
             state.lastBookUpdateMs > 0 ? "book stale" : "book missing",
           );
         }
-        if (!priceFresh) {
+        if (this.requireCryptoPrice && !priceFresh) {
           reasons.push(
             state.lastCryptoUpdateMs > 0 ? "price stale" : "price missing",
           );
@@ -789,8 +797,9 @@ export class MarketDataHub {
   private maybeRecoverData(state: MarketDataState, now: number): void {
     const bookFresh = this.isBookFresh(state, now);
     const priceFresh = this.isCryptoFresh(state, now);
+    const effectivePriceFresh = this.requireCryptoPrice ? priceFresh : true;
 
-    if (bookFresh && priceFresh) {
+    if (bookFresh && effectivePriceFresh) {
       return;
     }
 
@@ -802,7 +811,7 @@ export class MarketDataHub {
       this.maybeResetMarketWs(state, now);
     }
 
-    if (!priceFresh) {
+    if (this.requireCryptoPrice && !priceFresh) {
       this.maybeResetCryptoWs(state, now);
     }
 
