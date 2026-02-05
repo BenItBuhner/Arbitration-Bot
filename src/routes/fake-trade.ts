@@ -453,6 +453,30 @@ export async function fakeTradeRouteWithOptions(
     stdout: options.headless === true,
   });
 
+  // ── Pre-flight environment check ────────────────────────────────
+  const preflightIssues: string[] = [];
+  if (!process.env.KALSHI_API_KEY) {
+    preflightIssues.push("KALSHI_API_KEY is not set");
+  }
+  if (!process.env.KALSHI_PRIVATE_KEY_PATH && !process.env.KALSHI_PRIVATE_KEY_PEM) {
+    preflightIssues.push("Neither KALSHI_PRIVATE_KEY_PATH nor KALSHI_PRIVATE_KEY_PEM is set");
+  }
+  if (preflightIssues.length > 0) {
+    systemLogger.log("STARTUP ERROR: Missing required environment variables", "ERROR");
+    for (const issue of preflightIssues) {
+      systemLogger.log(`  - ${issue}`, "ERROR");
+    }
+    if (!options.headless) {
+      console.log("\nSTARTUP ERROR: Missing required environment variables:");
+      for (const issue of preflightIssues) {
+        console.log(`  - ${issue}`);
+      }
+    }
+    console.log("\nSee .env.example for required configuration.");
+    console.log("Set KALSHI_ENV=demo for demo mode, or KALSHI_ENV=prod for production.\n");
+    return;
+  }
+
   let kalshiConfig;
   try {
     kalshiConfig = getKalshiEnvConfig();
