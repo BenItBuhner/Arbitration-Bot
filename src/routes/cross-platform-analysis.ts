@@ -866,8 +866,11 @@ export async function crossPlatformAnalysisRoute(
             );
           }
         })
-        .catch(() => {
+        .catch((err) => {
           entry.polyOfficialFetchPending = false;
+          logDebug(
+            `OFFICIAL Polymarket fetch error ${entry.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+          );
         });
     };
 
@@ -926,8 +929,11 @@ export async function crossPlatformAnalysisRoute(
             );
           }
         })
-        .catch(() => {
+        .catch((err) => {
           entry.kalshiOfficialFetchPending = false;
+          logDebug(
+            `OFFICIAL Kalshi fetch error ${entry.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+          );
         });
     };
 
