@@ -273,6 +273,16 @@ describe("ArbitrageEngine", () => {
       expect(engine.getSummary().totalTrades).toBe(1);
     });
 
+    it("skips when market is already closed (timeLeft <= 0)", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const polySnap = makePolySnap({ timeLeftSec: -5 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: -5 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now() + 1);
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
     it("skips when gap is below minGap", () => {
       const configs = new Map([
         ["btc" as CoinSymbol, defaultCoinConfig({ minGap: 0.50 })], // absurdly high
@@ -605,6 +615,202 @@ describe("ArbitrageEngine", () => {
       // Should have resolved as a loss (UNKNOWN outcomes)
       const summary = engine.getSummary();
       expect(summary.wins + summary.losses).toBe(1);
+    });
+
+    it("force-resolves using crypto price when thresholds exist but official fetch fails", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime = now + 1000;
+
+      // Enter position
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+      const kalshiSnap = makeKalshiSnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Close markets WITH spot price data but missing official outcomes
+      // Price 50100 > threshold 50000 => both should resolve UP
+      const polySnapClosed = makePolySnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        referencePrice: 50000,
+        cryptoPrice: 50100,
+        priceHistoryWithTs: [
+          { price: 50100, ts: closeTime - 30000 },
+          { price: 50100, ts: closeTime - 20000 },
+          { price: 50100, ts: closeTime - 10000 },
+        ],
+      });
+      const kalshiSnapClosed = makeKalshiSnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        referencePrice: 50000,
+        cryptoPrice: 50100,
+        kalshiUnderlyingValue: 50100,
+        kalshiUnderlyingTs: closeTime - 5000,
+        priceHistoryWithTs: [
+          { price: 50100, ts: closeTime - 30000 },
+          { price: 50100, ts: closeTime - 20000 },
+          { price: 50100, ts: closeTime - 10000 },
+        ],
+      });
+
+      // Advance past the official wait timeout + position max age
+      const futureMs = closeTime + 400_000;
+      for (let i = 0; i < 10; i++) {
+        engine.evaluate(
+          makeSnapMap(polySnapClosed),
+          makeSnapMap(kalshiSnapClosed),
+          futureMs + i * 100,
+        );
+      }
+
+      // Position should have resolved
+      const views = engine.getMarketViews();
+      expect(views[0]!.position).toBeNull();
+      const summary = engine.getSummary();
+      expect(summary.wins + summary.losses).toBe(1);
+    });
+
+    it("cleans up position even when no data is available at all", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime = now + 1000;
+
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+      const kalshiSnap = makeKalshiSnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Close with absolutely NO resolution data
+      const polySnapDead = makePolySnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        priceHistoryWithTs: [],
+      });
+      const kalshiSnapDead = makeKalshiSnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        kalshiUnderlyingValue: null,
+        priceHistoryWithTs: [],
+      });
+
+      // Way past absolute timeout
+      const futureMs = now + 700_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(
+          makeSnapMap(polySnapDead),
+          makeSnapMap(kalshiSnapDead),
+          futureMs + i,
+        );
+      }
+
+      // Position MUST be cleaned up - can't hang forever
+      const views = engine.getMarketViews();
+      expect(views[0]!.position).toBeNull();
+      // Should be a loss since both outcomes are UNKNOWN
+      const summary = engine.getSummary();
+      expect(summary.losses).toBe(1);
+    });
+
+    it("allows new trade after force-resolved position is cleaned up", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime1 = now + 1000;
+
+      // Enter first position
+      const polySnap1 = makePolySnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime1,
+        priceToBeat: 50000,
+      });
+      const kalshiSnap1 = makeKalshiSnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime1,
+        priceToBeat: 50000,
+      });
+
+      engine.evaluate(makeSnapMap(polySnap1), makeSnapMap(kalshiSnap1), now);
+      engine.evaluate(makeSnapMap(polySnap1), makeSnapMap(kalshiSnap1), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Force-resolve (no data, past timeout)
+      const polySnapDead = makePolySnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime1,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        priceHistoryWithTs: [],
+      });
+      const kalshiSnapDead = makeKalshiSnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime1,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        kalshiUnderlyingValue: null,
+        priceHistoryWithTs: [],
+      });
+      const futureMs = now + 700_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(makeSnapMap(polySnapDead), makeSnapMap(kalshiSnapDead), futureMs + i);
+      }
+      expect(engine.getSummary().wins + engine.getSummary().losses).toBe(1);
+
+      // Now a NEW market appears - should be able to trade again
+      const closeTime2 = futureMs + 900_000;
+      const polySnap2 = makePolySnap({
+        slug: "btc-updown-15m-new",
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime2,
+        priceToBeat: 51000,
+      });
+      const kalshiSnap2 = makeKalshiSnap({
+        slug: "KXBTC15M-NEW",
+        marketTicker: "KXBTC15M-NEW",
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime2,
+        priceToBeat: 51000,
+      });
+
+      const tradeTime = futureMs + 10;
+      engine.evaluate(makeSnapMap(polySnap2), makeSnapMap(kalshiSnap2), tradeTime);
+      engine.evaluate(makeSnapMap(polySnap2), makeSnapMap(kalshiSnap2), tradeTime + 1);
+      // Should have entered a SECOND trade
+      expect(engine.getSummary().totalTrades).toBe(2);
     });
   });
 

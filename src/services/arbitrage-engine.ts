@@ -472,6 +472,10 @@ export class ArbitrageEngine {
       this.skipCoin(state, coin, "time_unknown", nowMs);
       return;
     }
+    if (timeLeft <= 0) {
+      this.skipCoin(state, coin, "market_closed", nowMs);
+      return;
+    }
     if (timeLeft > config.tradeAllowedTimeLeft) {
       this.skipCoin(state, coin, `waiting (${Math.round(timeLeft)}s left, allowed<=${config.tradeAllowedTimeLeft}s)`, nowMs);
       return;
