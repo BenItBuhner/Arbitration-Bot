@@ -22,6 +22,7 @@ import {
 const DECISION_COOLDOWN_MS = 200;
 const POSITION_MAX_AGE_MS = parseEnvNumber("ARB_POSITION_MAX_AGE_MS", 300_000, 30_000);
 const POSITION_MAX_UNRESOLVED_MS = parseEnvNumber("ARB_POSITION_MAX_UNRESOLVED_MS", 600_000, 60_000);
+const THRESHOLD_DIVERGENCE_MAX = parseEnvNumber("ARB_THRESHOLD_DIVERGENCE_PCT", 0.5, 0) / 100; // env is in %, internal is fraction
 const EXEC_DELAY_MIN_ENV = parseEnvNumber("EXECUTION_DELAY_MIN_MS", 250, 0);
 const EXEC_DELAY_MAX_ENV = parseEnvNumber("EXECUTION_DELAY_MAX_MS", 300, 0);
 const { min: EXEC_DELAY_MIN_MS, max: EXEC_DELAY_MAX_MS } = resolveDelayRange(
@@ -514,7 +515,7 @@ export class ArbitrageEngine {
     // This would cause a TOTAL LOSS on both legs.
     const thresholdDivergence = Math.abs(polyThreshold.value - kalshiThreshold.value);
     const thresholdDivergencePct = thresholdDivergence / Math.min(polyThreshold.value, kalshiThreshold.value);
-    if (thresholdDivergencePct > 0.005) { // > 0.5% divergence
+    if (THRESHOLD_DIVERGENCE_MAX > 0 && thresholdDivergencePct > THRESHOLD_DIVERGENCE_MAX) {
       this.skipCoin(
         state,
         coin,
@@ -644,7 +645,7 @@ export class ArbitrageEngine {
     // ── Threshold divergence re-check at execution time ──────────
     const confirmDivergence = Math.abs(polyThresholdCheck.value - kalshiThresholdCheck.value);
     const confirmDivergencePct = confirmDivergence / Math.min(polyThresholdCheck.value, kalshiThresholdCheck.value);
-    if (confirmDivergencePct > 0.005) {
+    if (THRESHOLD_DIVERGENCE_MAX > 0 && confirmDivergencePct > THRESHOLD_DIVERGENCE_MAX) {
       this.logger.log(
         `${polySnap.coin.toUpperCase()} PENDING_ABORT: threshold diverged during delay poly=${polyThresholdCheck.value.toFixed(2)} kalshi=${kalshiThresholdCheck.value.toFixed(2)} diff=${(confirmDivergencePct * 100).toFixed(2)}%`,
         "WARN",
