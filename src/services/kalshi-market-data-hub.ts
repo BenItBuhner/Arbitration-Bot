@@ -365,7 +365,8 @@ export function parseStrikePrice(market: Record<string, unknown>): number {
   return 0;
 }
 
-function isMarketOpen(market: Record<string, unknown>): boolean {
+/** Exported for testing. */
+export function isMarketOpen(market: Record<string, unknown>): boolean {
   const status = String(market.status ?? "").toLowerCase();
   if (status === "open" || status === "active") return true;
   if (
