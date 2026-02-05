@@ -1116,7 +1116,12 @@ export class KalshiMarketDataHub {
 
         maybeUpdateOutcomeLabels(state);
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.log(
+          `DATA: Kalshi reference refresh error: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
+      });
   }
 
   private maybeRefreshHtmlReference(state: KalshiMarketState, now: number): void {
@@ -1244,7 +1249,12 @@ export class KalshiMarketDataHub {
         now - state.lastReselectMs >= MARKET_RESELECT_COOLDOWN_MS
       ) {
         state.lastReselectMs = now;
-        this.rotateMarket(state.coin).catch(() => {});
+        this.rotateMarket(state.coin).catch((err) => {
+          this.logger.log(
+            `DATA: Kalshi rotate-close error ${state.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+            "ERROR",
+          );
+        });
         continue;
       }
 
@@ -1258,7 +1268,12 @@ export class KalshiMarketDataHub {
           `DATA: Kalshi reselecting ${state.coin.toUpperCase()} (stale data)`,
           "WARN",
         );
-        this.rotateMarket(state.coin).catch(() => {});
+        this.rotateMarket(state.coin).catch((err) => {
+          this.logger.log(
+            `DATA: Kalshi rotate error ${state.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+            "ERROR",
+          );
+        });
       }
     }
   }
@@ -1336,6 +1351,10 @@ export class KalshiMarketDataHub {
     if (current) {
       current.priceFeed?.stop();
       this.tickerToCoin.delete(current.marketTicker);
+      // Clean up orderbook state for rotated market to prevent memory leak
+      if (this.kalshiWs) {
+        this.kalshiWs.removeOrderbook(current.marketTicker);
+      }
     }
 
     this.states.set(coin, next);

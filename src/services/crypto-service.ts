@@ -29,7 +29,14 @@ export async function fetchHistoricalCryptoPrice(
     const timestamp = Math.floor(targetTime.getTime() / 1000);
     const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart/range?vs_currency=usd&from=${timestamp - 300}&to=${timestamp + 300}`;
 
-    const response = await fetch(url);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.ok) return null;
 
     const data = (await response.json()) as {

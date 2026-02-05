@@ -40,3 +40,4 @@ private-key.txt
 logs/
 backtest-data/
 sweeps/
+tests/.test-logs/

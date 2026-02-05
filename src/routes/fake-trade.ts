@@ -473,6 +473,32 @@ export async function fakeTradeRouteWithOptions(
   await polyHub.start(resolvedCoins);
   await kalshiHub.start(resolvedCoins);
 
+  // ── Startup health check ──────────────────────────────────────
+  systemLogger.log(
+    `STARTUP: profiles=[${resolvedProfiles.join(",")}] coins=[${resolvedCoins.join(",")}] headless=${options.headless ?? false}`,
+  );
+  for (const profile of profiles) {
+    if (!resolvedProfiles.includes(profile.name)) continue;
+    for (const coin of resolvedCoins) {
+      const cfg = profile.coins.get(coin);
+      if (cfg) {
+        systemLogger.log(
+          `STARTUP: ${profile.name}/${coin.toUpperCase()} minGap=${cfg.minGap} fillUsd=${cfg.fillUsd} tradeAllowed=${cfg.tradeAllowedTimeLeft}s tradeStop=${cfg.tradeStopTimeLeft ?? "null"}`,
+        );
+      }
+    }
+  }
+  // Log initial market selections
+  const polyInitialSnaps = polyHub.getSnapshots();
+  const kalshiInitialSnaps = kalshiHub.getSnapshots();
+  for (const coin of resolvedCoins) {
+    const polySnap = polyInitialSnaps.get(coin);
+    const kalshiSnap = kalshiInitialSnaps.get(coin);
+    systemLogger.log(
+      `STARTUP: ${coin.toUpperCase()} polyMarket=${polySnap?.slug ?? "pending"} kalshiMarket=${kalshiSnap?.slug ?? "pending"} polyThreshold=${polySnap?.priceToBeat ?? "n/a"} kalshiThreshold=${kalshiSnap?.priceToBeat ?? "n/a"}`,
+    );
+  }
+
   const kalshiOutcomeClient = new KalshiClient(kalshiConfig);
   const profileEngines: ArbitrageEngine[] = [];
   const profileCoinsByName = new Map<string, CoinSymbol[]>();
@@ -581,9 +607,14 @@ export async function fakeTradeRouteWithOptions(
       )
     : () => {};
 
-  // ── Fast evaluation loop (1ms) ───────────────────────────────────
-  // The arb engine must react to opportunities sub-millisecond.
-  // setInterval floors to 1ms in Node; this is the fastest poll possible.
+  // ── Evaluation loop ─────────────────────────────────────────────
+  // Default 10ms is fast enough to catch arb opportunities (market data
+  // arrives at ~50-100ms granularity via WS) while being much more
+  // CPU-friendly than the previous 1ms interval.
+  const ARB_EVAL_INTERVAL_MS = Math.max(
+    1,
+    Number(process.env.ARB_EVAL_INTERVAL_MS) || 10,
+  );
   const evalTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
@@ -597,7 +628,7 @@ export async function fakeTradeRouteWithOptions(
         error instanceof Error ? error.message : "Unknown error in eval loop.";
       systemLogger.log(`Arbitrage eval error: ${message}`, "ERROR");
     }
-  }, 1);
+  }, ARB_EVAL_INTERVAL_MS);
 
   // ── Render loop (250ms) ────────────────────────────────────────
   // Dashboard rendering and odds history are visual-only; 4 fps for snappy UI.

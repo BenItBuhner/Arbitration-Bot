@@ -324,7 +324,14 @@ function parseNumeric(value: unknown): number | null {
     const cleaned = value.replace(/[$,%]/g, "").replace(/,/g, "").trim();
     if (!cleaned) return null;
     const parsed = Number(cleaned);
-    return Number.isFinite(parsed) ? parsed : null;
+    if (Number.isFinite(parsed)) return parsed;
+    // Fallback: extract numeric from text like "Price to beat: 63902.51"
+    const match = cleaned.match(/([0-9]+(?:\.[0-9]+)?)/);
+    if (match && match[1]) {
+      const extracted = Number(match[1]);
+      if (Number.isFinite(extracted)) return extracted;
+    }
+    return null;
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
