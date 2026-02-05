@@ -1,6 +1,6 @@
-# Poly-Saturate-Bot
+# Arbitration Bot (Polymarket + Kalshi)
 
-A Polymarket simulated trading bot with backtesting capabilities. Run trading strategies, monitor markets in real-time, and backtest on historical data.
+Paper arbitrage engine and analytics for crypto Up/Down markets on Polymarket and Kalshi. Includes live dashboards, cross-platform outcome analysis, price gap detection, and historical backtesting.
 
 ## Quick Start
 
@@ -8,184 +8,211 @@ A Polymarket simulated trading bot with backtesting capabilities. Run trading st
 # Install dependencies
 bun install
 
-# Interactive mode (recommended for first-time users)
+# Copy env and fill in keys
+cp .env.example .env
+# Windows PowerShell:
+# copy .env.example .env
+
+# Interactive mode (menu)
 bun run main.ts
 
 # View all CLI options
 bun run main.ts -- --help
-
-# Quick automated fake trade
-bun run main.ts -- --fake-trade -- --auto
-
-# Fake trade on Kalshi (provider prompt or flag)
-MARKET_PROVIDER=kalshi bun run main.ts -- --fake-trade -- --auto
-bun run main.ts -- --fake-trade -- --provider kalshi -- --auto
 ```
 
 ## Features
 
-- **Fake Trade Mode**: Simulate trading with configurable strategies on live Polymarket markets
-- **Watch Market Mode**: Monitor any Polymarket market with real-time WebSocket data
-- **Backtesting**: Test strategies on historical market data
-- **Multi-Profile Trading**: Run multiple strategies simultaneously
-- **Real-Time Dashboard**: Live monitoring of trades, prices, and performance
+- Paper arbitrage engine with per-coin rules and PnL tracking
+- Cross-platform outcome analysis with official resolution matching
+- Real-time price diff detection with realistic fill simulation
+- Live dashboards with profile tabs and coin tabs
+- Historical backtesting
+- Headless modes for server and Docker use
 
 ## Modes
 
-### 1. Fake Trade Mode
-Run simulated trading with predefined strategies. Automatically finds active Up/Down markets for selected cryptocurrencies.
+### Arbitrage Bot (paper)
+Simulated arbitrage engine that consumes Polymarket + Kalshi order books, computes realistic fills, and tracks PnL and win rate. Uses the `arbitrage` section in `config.json`.
 
+Mode flags:
+- `--mode fake-trade` (aliases: `fake`, `arbitrage`, `arb`)
+- `--fake-trade`
+
+Examples:
 ```bash
-# Interactive fake trade
-bun run main.ts -- --fake-trade
-
-# Auto-select all profiles and coins
-bun run main.ts -- --fake-trade -- --auto
-
-# Specific profiles and coins
-bun run main.ts -- --fake-trade -- --profiles aggressiveTraderV2,V3 -- --coins eth,btc
+bun run main.ts -- --mode fake-trade --profiles arbBotV1 --coins eth,btc
+bun run main.ts -- --mode fake-trade --auto
+bun run main.ts -- --fake-trade --headless
 ```
 
-**Trading Profiles**: `aggressiveTrader`, `aggressiveTraderV2`, `aggressiveTraderV3`, `aggressiveTraderV4`
+Controls:
+- Up/Down: switch profile
+- Left/Right: switch coin tab
 
-**Supported Coins**: `eth`, `btc`, `sol`, `xrp`
+Logs:
+- `logs/run*` with `system.log`, `mismatch.log`, and one log per profile (e.g. `arbBotV1.log`)
 
-### 2. Watch Market Mode
-Monitor any Polymarket market in real-time with live order book data.
+### Cross-Platform Outcome Analysis
+Compares Polymarket vs Kalshi outcomes for matching markets, tracks accuracy, and logs mismatches.
 
+Mode flags:
+- `--mode cross-platform-analysis` (aliases: `cross-platform`, `outcome-analysis`, `analysis`)
+- `--cross-platform-analysis`
+
+Examples:
 ```bash
-# Interactive search
-bun run main.ts -- --watch-market
-
-# Monitor specific market by keyword or URL
-bun run main.ts -- --watch-market -- --market "bitcoin"
-bun run main.ts -- --watch-market -- --market "https://polymarket.com/event/..."
+bun run main.ts -- --mode cross-platform-analysis --coins eth,btc
+bun run main.ts -- --cross-platform-analysis --headless-summary
 ```
 
-### 3. Backtesting Mode
-Test strategies on historical market data to evaluate performance.
+Logs:
+- `logs/cross-platform/run*` with `system.log`, `mismatch.log`, and `debug.log` in headless summary mode
 
+### Price Diff Detection
+Flags large gaps between `PolyUp + KalshiNo` and `PolyDown + KalshiYes`, tracks how often each market meets the threshold, and optionally runs realistic fill simulation with post-delay confirmation.
+
+Mode flags:
+- `--mode price-diff-detection` (aliases: `price-diff`, `diff`)
+- `--price-diff-detection`
+
+Examples:
 ```bash
-# Interactive backtest
-bun run main.ts -- --backtest
-
-# Fast backtesting (no dashboard)
-bun run main.ts -- --backtest -- --auto -- --fast
-
-# Visual backtesting (step-by-step)
-bun run main.ts -- --backtest -- --auto -- --visual
-
-# Headless backtest (logs to console)
-bun run main.ts -- --backtest -- --headless
-
-# Specific date range
-bun run main.ts -- --backtest -- --data-dir backtest-data -- --start "2024-01-01T00:00:00Z" -- --end "2024-01-07T23:59:59Z"
-
-# Control simulation speed
-bun run main.ts -- --backtest -- --speed max    # Maximum speed
-bun run main.ts -- --backtest -- --speed 2      # 2x speed
+bun run main.ts -- --mode price-diff-detection --coins eth,sol --realistic-fill
+bun run main.ts -- --price-diff-detection --headless-summary --fill-usd 500
 ```
 
-### 4. Trading Mode
-Placeholder for future real-money trading implementation.
+Logs:
+- `logs/price-diff/run*` with `system.log` and `debug.log` in headless summary mode
 
+### Watch Market
+Monitor a single market in real time.
+
+Mode flags:
+- `--mode watch-market` (alias: `watch`)
+- `--watch-market`
+
+Examples:
 ```bash
-bun run main.ts -- --trading
+bun run main.ts -- --mode watch-market --market "bitcoin"
+bun run main.ts -- --watch --provider polymarket --market "https://polymarket.com/event/..."
 ```
 
-## CLI Flags
+### Backtest (historical)
+Replay markets from stored data, with optional visualization.
 
-### Mode Selection
-```
---mode <fake-trade|watch-market|trading|backtest>
---fake-trade | --fake               # Start fake trade mode
---watch-market | --watch            # Start watch market mode
---backtest | --historical           # Start backtest mode
---trading | --trade                 # Start trading mode
---help | -h                         # Show usage information
-```
+Mode flags:
+- `--mode backtest` (alias: `historical`)
+- `--backtest`
 
-### Fake Trade Options
-```
---profiles <name1,name2>            # Select trading profiles
---coins <eth,btc,sol,xrp>           # Select cryptocurrencies
---auto                              # Auto-select all profiles/coins
---provider <polymarket|kalshi>      # Select market provider
---kalshi | --polymarket             # Provider shortcuts
---headless                          # Disable dashboard UI
+Examples:
+```bash
+bun run main.ts -- --mode backtest --auto --data-dir backtest-data --speed max
+bun run main.ts -- --backtest --backtest-mode visual --start "2024-01-01T00:00:00Z" --end "2024-01-07T23:59:59Z"
 ```
 
-### Watch Market Options
+## CLI Flags (full list)
 ```
---market <keyword|url>              # Market keyword or Polymarket URL
---query <keyword>                   # Alias for --market
---search <keyword>                  # Alias for --market
+--mode <fake-trade|watch-market|cross-platform-analysis|price-diff-detection|backtest>
+--fake-trade | --watch-market | --cross-platform-analysis | --price-diff-detection | --backtest
+--profiles <name1,name2>          (arbitrage bot)
+--coins <eth,btc,sol,xrp>         (arbitrage, cross-platform-analysis, price-diff-detection)
+--auto                            (arbitrage/backtest: select all profiles/coins)
+--provider <polymarket|kalshi>    (watch-market)
+--kalshi | --polymarket           (provider shortcut)
+--market <keyword|url>            (watch-market)
+--data-dir <path>                 (backtest)
+--speed <n|max>                   (backtest)
+--backtest-mode <fast|visual>     (backtest)
+--fast                            (backtest alias for fast)
+--visual                          (backtest alias for visual)
+--headless                        (backtest/arbitrage/cross-platform/price-diff: disable dashboard UI)
+--headless-summary                (cross-platform/price-diff: headless + concise summary logs)
+--realistic-fill                  (price-diff-detection: book-walk fill simulation)
+--no-realistic-fill               (price-diff-detection: disable fill simulation)
+--fill-usd <amount>               (price-diff-detection: USD budget for fill simulation)
+--start <iso|ms>                   (backtest)
+--end <iso|ms>                     (backtest)
+--help
 ```
 
-### Backtest Options
-```
---data-dir <path>                   # Directory containing historical data
---speed <n|max>                     # Simulation speed (max = unlimited)
---fast                              # Alias for fast backtest mode
---visual                            # Alias for visual backtest mode
---backtest-mode <fast|visual>       # Explicit backtest mode selection
---headless                          # Disable dashboard, print logs
---start <iso|ms>                    # Start time (ISO format or milliseconds)
---end <iso|ms>                      # End time (ISO format or milliseconds)
-```
+## Configuration (`config.json`)
 
-## Configuration
+`config.json` is provider-first with a dedicated `arbitrage` section for the paper bot. Coins must exist in both providers for cross-platform and arbitrage modes to run.
 
-Edit `config.json` to customize trading strategies. The config is provider-first with market groups.
-
+Minimal example (valid JSON):
 ```json
 {
   "schemaVersion": 2,
   "providers": {
     "polymarket": {
-      "coins": ["eth", "btc"],
-      "marketGroups": [
-        { "id": "updown-15m", "match": { "slugRegex": "^(eth|btc)-.*-15m-" } },
-        { "id": "default", "match": {} }
-      ],
-      "profiles": {
-        "aggressiveTrader": {
-          "markets": {
-            "updown-15m": {
-              "eth": {
-                "120": {
-                  "minimumPriceDifference": 5,
-                  "maximumSharePrice": 0.99,
-                  "minimumSharePrice": 0.8,
-                  "maximumSpend": 50,
-                  "minimumSpend": 1.5
-                },
-                "tradeAllowedTimeLeft": 480
-              }
-            }
-          }
-        }
-      }
+      "coins": ["eth", "btc", "sol"],
+      "marketGroups": [{ "id": "default", "match": {} }],
+      "profiles": {}
     },
     "kalshi": {
       "coins": {
         "eth": {
-          "tickers": ["KXETH15M-26FEB021730"],
+          "tickers": [],
           "seriesTickers": ["KXETH15M"],
           "eventTickers": [],
-          "marketUrls": [
-            "https://kalshi.com/markets/kxeth15m/eth-15m-price-up-down/kxeth15m-26feb021730"
-          ],
+          "marketUrls": [],
+          "autoDiscover": true
+        },
+        "btc": {
+          "tickers": [],
+          "seriesTickers": ["KXBTC15M"],
+          "eventTickers": [],
+          "marketUrls": [],
+          "autoDiscover": true
+        },
+        "sol": {
+          "tickers": [],
+          "seriesTickers": ["KXSOL15M"],
+          "eventTickers": [],
+          "marketUrls": [],
           "autoDiscover": true
         }
       },
       "marketGroups": [{ "id": "default", "match": {} }],
-      "profiles": {
-        "aggressiveTrader": {
-          "markets": {
-            "default": {
-              "btc": { "...": "same TimedTradeConfig shape" }
-            }
+      "profiles": {}
+    }
+  },
+  "arbitrage": {
+    "profiles": {
+      "arbBotV1": {
+        "coins": {
+          "eth": {
+            "tradeAllowedTimeLeft": 750,
+            "tradeStopTimeLeft": 1,
+            "minGap": 0.04,
+            "maxSpendTotal": 500,
+            "minSpendTotal": 10,
+            "maxSpread": null,
+            "minDepthValue": null,
+            "maxPriceStalenessSec": null,
+            "fillUsd": 500
+          },
+          "btc": {
+            "tradeAllowedTimeLeft": 750,
+            "tradeStopTimeLeft": 1,
+            "minGap": 0.04,
+            "maxSpendTotal": 500,
+            "minSpendTotal": 10,
+            "maxSpread": null,
+            "minDepthValue": null,
+            "maxPriceStalenessSec": null,
+            "fillUsd": 500
+          },
+          "sol": {
+            "tradeAllowedTimeLeft": 750,
+            "tradeStopTimeLeft": 1,
+            "minGap": 0.04,
+            "maxSpendTotal": 500,
+            "minSpendTotal": 10,
+            "maxSpread": null,
+            "minDepthValue": null,
+            "maxPriceStalenessSec": null,
+            "fillUsd": 500
           }
         }
       }
@@ -195,35 +222,84 @@ Edit `config.json` to customize trading strategies. The config is provider-first
 ```
 
 Kalshi selector notes:
-- `tickers`: explicit market tickers (bot will prefer these if open)
-- `seriesTickers`: series-level tickers to auto-discover the current open market
-- `eventTickers`: event-level tickers to auto-discover the current open market
-- `marketUrls`: full Kalshi market URLs (the bot extracts the series/market tickers)
-- `autoDiscover`: when `true`, the bot uses Kalshi's market list APIs to rotate to the latest open market as older ones close
+- `tickers`: explicit market tickers
+- `seriesTickers`: series-level tickers (auto-discover open markets)
+- `eventTickers`: event-level tickers (auto-discover open markets)
+- `marketUrls`: full market URLs (series/market tickers are extracted)
+- `autoDiscover`: when true, rotates to the latest open market
 
-### Advanced Configuration Fields
-Additional fields available per time bracket:
-- `maxSpread` - Maximum price spread allowed
-- `minBookImbalance` - Minimum order book imbalance
-- `minDepthValue` - Minimum depth value in order book
-- `minTradeVelocity` - Minimum trade velocity
-- `minMomentum` - Minimum price momentum
-- `minVolatility` - Minimum price volatility
-- `maxPriceStalenessSec` - Max time price can be stale
-- `minConfidence` - Minimum confidence score
-- `sizeStrategy` - Position sizing strategy ("fixed" | "edge")
-- `sizeScale` - Scale factor for position sizing
-- `maxOpenExposure` - Maximum open exposure
+### Arbitrage coin config fields
+- `tradeAllowedTimeLeft` (sec): trades only when time left is at or below this value
+- `tradeStopTimeLeft` (sec | null): stop trading when time left is at or below this value
+- `minGap`: minimum profit gap required (`1 - (polyAsk + kalshiAsk)`)
+- `maxSpendTotal`: hard max total cost across both legs
+- `minSpendTotal`: minimum total cost required to place a trade
+- `maxSpread` (optional): maximum allowed spread per book
+- `minDepthValue` (optional): minimum total ask depth per book
+- `maxPriceStalenessSec` (optional): max allowed age for spot prices
+- `fillUsd`: USD budget used for the fill estimate (book-walk)
 
-#### Cross & Double-Down (Optional)
-Profiles can include a `cross` block per coin to allow a single opposing-side trade when the favored outcome flips late.
-Each `cross` tier supports the standard rule fields plus:
-- `minRecoveryMultiple` - Minimum recovery multiple vs realized loss (e.g., 2)
-- `minLossToTrigger` - Minimum realized loss to allow crossing
+`fillUsd` is the budget used to estimate shares and average prices. `maxSpendTotal` is the hard ceiling the trade cannot exceed. The estimate is computed from `fillUsd` and then validated against min/max spend.
 
-### Trading Criteria
-Each strategy evaluates trades based on:
-1. **Time Criteria** - Only trades if sufficient time remains
-2. **Price Gap Criteria** - Requires minimum price difference
-3. **Share Price Criteria** - Restricts trades to acceptable price ranges
-4. **Liquidity Criteria** - (Optional) Minimum order book depth
+## Execution Delay Model
+Both the arbitrage bot and price diff detection use the same execution delay model:
+1. Detect a valid opportunity and commit immediately.
+2. Apply a random delay between `EXECUTION_DELAY_MIN_MS` and `EXECUTION_DELAY_MAX_MS`.
+3. Re-check the books and finalize the fill using post-delay prices.
+4. No abort is allowed after commitment; slippage is recorded.
+
+## Environment Variables
+
+### Required
+- `POLYMARKET_TRADES_PROVIDER` (e.g. `data-api`)
+- `POLYMARKET_CLOB_PRIVATE_KEY`
+- `POLYMARKET_CLOB_API_KEY`
+- `POLYMARKET_CLOB_API_SECRET`
+- `KALSHI_ENV` (e.g. `demo`)
+- `KALSHI_API_KEY`
+- `KALSHI_PRIVATE_KEY_PATH`
+
+### Core optional
+- `MARKET_PROVIDER` (default provider for watch-market)
+- `TEST_PRICE_DIFF_REQ` (gap threshold for price diff detection)
+- `PRICE_DIFF_FILL_USD` (default fill budget when not provided)
+- `EXECUTION_DELAY_MIN_MS` / `EXECUTION_DELAY_MAX_MS` (post-commit delay range)
+- `TUI_ALT_SCREEN` (set `false` to disable alternate screen buffer)
+- `KALSHI_PRIVATE_KEY_PEM` (optional inline key instead of file path)
+- `KALSHI_BASE_URL` / `KALSHI_WS_URL` (override Kalshi endpoints)
+- `KALSHI_WEB_EMAIL` / `KALSHI_WEB_PASSWORD` (optional web session for v1/forecast_history)
+
+### Cross-platform analysis tuning (optional)
+- `CROSS_ANALYSIS_FINAL_WINDOW_MS`
+- `CROSS_ANALYSIS_FINAL_GRACE_MS`
+- `CROSS_ANALYSIS_FINAL_MIN_POINTS`
+- `CROSS_ANALYSIS_OFFICIAL_WAIT_MS`
+- `CROSS_ANALYSIS_MATCH_TIME_TOLERANCE_MS`
+- `CROSS_ANALYSIS_SLOT_DURATION_MS`
+- `CROSS_ANALYSIS_SLOT_TOLERANCE_MS`
+- `CROSS_ANALYSIS_STALE_LOG_MS`
+- `CROSS_ANALYSIS_PRICE_STALE_MS`
+- `CROSS_ANALYSIS_BOOK_STALE_MS`
+- `CROSS_ANALYSIS_SUMMARY_LOG_MS`
+- `CROSS_ANALYSIS_OFFICIAL_RETRY_BASE_MS`
+- `CROSS_ANALYSIS_OFFICIAL_RETRY_MAX_MS`
+- `CROSS_ANALYSIS_OFFICIAL_RETRIES`
+- `CROSS_ANALYSIS_VERBOSE`
+- `CROSS_ANALYSIS_MISMATCH_VERBOSE`
+
+### Price diff detection tuning (optional)
+- `PRICE_DIFF_LOG_INTERVAL_MS`
+- `PRICE_DIFF_SUMMARY_LOG_MS`
+- `PRICE_DIFF_BOOK_STALE_MS`
+- `PRICE_DIFF_STALE_LOG_MS`
+
+### Market data tuning (optional)
+- `PM_HTML_REF_REFRESH_MS`
+- `PM_HTML_REF_RETRY_BASE_MS`
+- `PM_HTML_REF_RETRY_MAX_MS`
+- `PM_HTML_REF_TIMEOUT_MS`
+- `PM_HTML_REF_MATCH_TOLERANCE_MS`
+- `PM_HTML_REF_ENABLED`
+- `LIVE_SIGNAL_PREP`
+- `AUTO_MARKET_MIN_LIQUIDITY`
+- `AUTO_MARKET_MIN_VOLUME_24H`
