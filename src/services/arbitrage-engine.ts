@@ -567,6 +567,25 @@ export class ArbitrageEngine {
     const pending = state.pendingOrder;
     if (!pending) return;
 
+    // ── Threshold re-validation at execution time ────────────────
+    // If thresholds vanished during the delay, abort rather than
+    // entering a position that can never resolve its outcome.
+    const polyThresholdCheck = resolveThreshold(polySnap);
+    const kalshiThresholdCheck = resolveThreshold(kalshiSnap);
+    if (
+      !polyThresholdCheck.value ||
+      polyThresholdCheck.value <= 0 ||
+      !kalshiThresholdCheck.value ||
+      kalshiThresholdCheck.value <= 0
+    ) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} PENDING_ABORT: threshold vanished during delay polyThreshold=${polyThresholdCheck.value ?? "null"} kalshiThreshold=${kalshiThresholdCheck.value ?? "null"}`,
+        "WARN",
+      );
+      state.pendingOrder = null;
+      return;
+    }
+
     // Execution delay model: We are already committed. No abort possible.
     // Re-fetch post-delay books to determine actual fill.
     const fillBudget = resolveFillBudget(config);
@@ -859,8 +878,12 @@ export class ArbitrageEngine {
           );
         }
       })
-      .catch(() => {
+      .catch((err) => {
         position.polyOfficialFetchPending = false;
+        this.logger.log(
+          `OFFICIAL_FETCH_ERROR poly slug=${position.polySlug}: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
       });
   }
 
@@ -922,8 +945,12 @@ export class ArbitrageEngine {
           );
         }
       })
-      .catch(() => {
+      .catch((err) => {
         position.kalshiOfficialFetchPending = false;
+        this.logger.log(
+          `OFFICIAL_FETCH_ERROR kalshi ticker=${position.kalshiSlug}: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
       });
   }
 

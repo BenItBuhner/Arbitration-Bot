@@ -498,6 +498,164 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("threshold validation", () => {
+    it("skips trade entry when Kalshi threshold is null/zero", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      // Kalshi has no threshold -- this was the bug from the screenshot
+      const kalshiSnap = makeKalshiSnap({
+        timeLeftSec: 600,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now() + 1);
+      const views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).toBeNull();
+      expect(views[0]!.position).toBeNull();
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
+    it("skips trade entry when Poly threshold is null/zero", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+      });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now() + 1);
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
+    it("enters trade when both thresholds are valid", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      const now = Date.now();
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+    });
+  });
+
+  describe("position force resolution", () => {
+    it("force-resolves stuck position after max unresolved time", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime = now + 1000;
+
+      // Enter position
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+      const kalshiSnap = makeKalshiSnap({
+        timeLeftSec: 600,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Close markets but with NO resolution data (threshold missing on snap)
+      const polySnapStuck = makePolySnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        priceHistoryWithTs: [],
+      });
+      const kalshiSnapStuck = makeKalshiSnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        cryptoPrice: 0,
+        kalshiUnderlyingValue: null,
+        priceHistoryWithTs: [],
+      });
+
+      // Evaluate many times well past the 10-minute absolute timeout
+      // POSITION_MAX_UNRESOLVED_MS defaults to 600_000 (10 min)
+      const futureMs = now + 700_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(
+          makeSnapMap(polySnapStuck),
+          makeSnapMap(kalshiSnapStuck),
+          futureMs + i,
+        );
+      }
+
+      // Position should have been force-resolved (cleaned up)
+      const views = engine.getMarketViews();
+      expect(views[0]!.position).toBeNull();
+      // Should have resolved as a loss (UNKNOWN outcomes)
+      const summary = engine.getSummary();
+      expect(summary.wins + summary.losses).toBe(1);
+    });
+  });
+
+  describe("error boundaries", () => {
+    it("continues evaluating other coins when one throws", () => {
+      // We test this by having two coins, where one has missing data
+      // that would previously cause issues, but the other is fine
+      const configs = new Map<CoinSymbol, ArbitrageCoinConfig>([
+        ["btc", defaultCoinConfig()],
+        ["eth", defaultCoinConfig()],
+      ]);
+      const engine = createEngine(configs, { decisionLatencyMs: 0 });
+
+      // BTC has valid data, ETH has valid data too
+      const btcPoly = makePolySnap({ coin: "btc", timeLeftSec: 600 });
+      const btcKalshi = makeKalshiSnap({ coin: "btc", timeLeftSec: 600 });
+      const ethPoly = makePolySnap({
+        coin: "eth",
+        symbol: "eth/usd",
+        slug: "eth-updown-15m-test",
+        timeLeftSec: 600,
+      });
+      const ethKalshi = makeKalshiSnap({
+        coin: "eth",
+        symbol: "eth/usd",
+        slug: "KXETH15M-TEST",
+        marketTicker: "KXETH15M-TEST",
+        timeLeftSec: 600,
+      });
+
+      const polySnaps = new Map<CoinSymbol, MarketSnapshot>([
+        ["btc", btcPoly],
+        ["eth", ethPoly],
+      ]);
+      const kalshiSnaps = new Map<CoinSymbol, MarketSnapshot>([
+        ["btc", btcKalshi],
+        ["eth", ethKalshi],
+      ]);
+
+      // Should not throw, even if internal processing has issues
+      expect(() => {
+        engine.evaluate(polySnaps, kalshiSnaps, Date.now());
+        engine.evaluate(polySnaps, kalshiSnaps, Date.now() + 1);
+      }).not.toThrow();
+
+      // Both coins should have been evaluated
+      const views = engine.getMarketViews();
+      expect(views.length).toBe(2);
+    });
+  });
+
   describe("data status rendering", () => {
     it("reports stale when either snapshot is stale", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });

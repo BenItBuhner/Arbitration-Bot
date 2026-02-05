@@ -922,6 +922,7 @@ export class KalshiMarketDataHub {
   }
 
   private handleCryptoPrice(payload: CryptoPricePayload): void {
+    if (!Number.isFinite(payload.value) || payload.value <= 0) return;
     const symbolKey = payload.symbol.toLowerCase();
     const coin = SYMBOL_TO_COIN[symbolKey];
     if (!coin) return;
