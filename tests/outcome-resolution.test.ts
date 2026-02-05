@@ -85,6 +85,30 @@ describe("resolveThreshold", () => {
   });
 });
 
+  it("extracts large price from label with commas", () => {
+    const snap = createSnap({
+      priceToBeat: 0,
+      referencePrice: 0,
+      referenceSource: "missing",
+      upOutcome: "Price to beat: $100,000.00",
+    });
+    const result = resolveThreshold(snap);
+    expect(result.value).toBeCloseTo(100000, 0);
+    expect(result.source).toBe("label");
+  });
+
+  it("extracts small price from label without commas", () => {
+    const snap = createSnap({
+      priceToBeat: 0,
+      referencePrice: 0,
+      referenceSource: "missing",
+      downOutcome: "Price to beat: $150.25",
+    });
+    const result = resolveThreshold(snap);
+    expect(result.value).toBeCloseTo(150.25, 1);
+    expect(result.source).toBe("label");
+  });
+
 // ── resolveCloseTimeMs ───────────────────────────────────────────
 
 describe("resolveCloseTimeMs", () => {

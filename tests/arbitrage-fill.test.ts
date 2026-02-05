@@ -238,6 +238,52 @@ describe("computeFillEstimate", () => {
   });
 });
 
+// ── Edge cases for real-world reliability ────────────────────────
+
+describe("computeFillEstimate edge cases", () => {
+  it("handles very thin liquidity (1 share each)", () => {
+    const asksPoly: OrderBookLevel[] = [{ price: 0.40, size: 1 }];
+    const asksKalshi: OrderBookLevel[] = [{ price: 0.50, size: 1 }];
+    const result = computeFillEstimate(asksPoly, asksKalshi, 100);
+    expect(result).not.toBeNull();
+    expect(result!.shares).toBe(1);
+    expect(result!.gap).toBeCloseTo(0.1, 5);
+  });
+
+  it("handles extremely deep books efficiently", () => {
+    const asksPoly: OrderBookLevel[] = [];
+    const asksKalshi: OrderBookLevel[] = [];
+    for (let i = 0; i < 100; i++) {
+      asksPoly.push({ price: 0.40 + i * 0.001, size: 10 });
+      asksKalshi.push({ price: 0.50 + i * 0.001, size: 10 });
+    }
+    const result = computeFillEstimate(asksPoly, asksKalshi, 500);
+    expect(result).not.toBeNull();
+    expect(result!.shares).toBeGreaterThan(0);
+    expect(result!.totalCost).toBeLessThanOrEqual(500);
+  });
+
+  it("gap decreases as fills walk deeper into book", () => {
+    // First level is cheap, second is expensive
+    const asksPoly: OrderBookLevel[] = [
+      { price: 0.30, size: 5 },
+      { price: 0.45, size: 100 },
+    ];
+    const asksKalshi: OrderBookLevel[] = [
+      { price: 0.40, size: 5 },
+      { price: 0.55, size: 100 },
+    ];
+    // Small fill: uses cheap levels
+    const small = computeFillEstimate(asksPoly, asksKalshi, 5);
+    // Large fill: walks into expensive levels
+    const large = computeFillEstimate(asksPoly, asksKalshi, 100);
+    expect(small).not.toBeNull();
+    expect(large).not.toBeNull();
+    // Small fill should have better gap (cheaper prices)
+    expect(small!.gap).toBeGreaterThan(large!.gap);
+  });
+});
+
 // ── randomDelayMs ────────────────────────────────────────────────
 
 describe("randomDelayMs", () => {
