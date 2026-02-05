@@ -641,6 +641,18 @@ export class ArbitrageEngine {
       return;
     }
 
+    // ── Threshold divergence re-check at execution time ──────────
+    const confirmDivergence = Math.abs(polyThresholdCheck.value - kalshiThresholdCheck.value);
+    const confirmDivergencePct = confirmDivergence / Math.min(polyThresholdCheck.value, kalshiThresholdCheck.value);
+    if (confirmDivergencePct > 0.005) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} PENDING_ABORT: threshold diverged during delay poly=${polyThresholdCheck.value.toFixed(2)} kalshi=${kalshiThresholdCheck.value.toFixed(2)} diff=${(confirmDivergencePct * 100).toFixed(2)}%`,
+        "WARN",
+      );
+      state.pendingOrder = null;
+      return;
+    }
+
     // Execution delay model: We are already committed. No abort possible.
     // Re-fetch post-delay books to determine actual fill.
     const fillBudget = resolveFillBudget(config);
