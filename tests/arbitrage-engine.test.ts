@@ -555,6 +555,45 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("threshold divergence detection", () => {
+    it("skips trade when thresholds differ by more than 0.5%", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+
+      // Poly: $50,000, Kalshi: $49,500 (1% divergence)
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 49500 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now() + 1);
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
+    it("allows trade when thresholds match exactly", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+    });
+
+    it("allows trade when thresholds differ by less than 0.5%", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+
+      // $50,000 vs $50,100 = 0.2% divergence (within tolerance)
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50100 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+    });
+  });
+
   describe("threshold re-validation on confirm", () => {
     it("aborts pending order if Kalshi threshold vanishes during execution delay", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 100 });

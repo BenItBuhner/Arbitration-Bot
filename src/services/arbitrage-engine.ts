@@ -507,6 +507,23 @@ export class ArbitrageEngine {
       return;
     }
 
+    // ── Threshold divergence check ──────────────────────────────
+    // The arbitrage assumes both platforms resolve the same direction.
+    // If thresholds differ significantly, the outcome could diverge
+    // (e.g., price between the two thresholds → one is UP, other is DOWN).
+    // This would cause a TOTAL LOSS on both legs.
+    const thresholdDivergence = Math.abs(polyThreshold.value - kalshiThreshold.value);
+    const thresholdDivergencePct = thresholdDivergence / Math.min(polyThreshold.value, kalshiThreshold.value);
+    if (thresholdDivergencePct > 0.005) { // > 0.5% divergence
+      this.skipCoin(
+        state,
+        coin,
+        `threshold_divergence poly=${polyThreshold.value.toFixed(2)} kalshi=${kalshiThreshold.value.toFixed(2)} diff=${(thresholdDivergencePct * 100).toFixed(2)}%`,
+        nowMs,
+      );
+      return;
+    }
+
     const upNo = buildCandidate(
       "upNo",
       polySnap,
