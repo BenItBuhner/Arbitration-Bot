@@ -205,6 +205,114 @@ describe("fuzz: outcome resolution", () => {
   });
 });
 
+// ── Fuzz: ArbitrageEngine ────────────────────────────────────────
+
+describe("fuzz: ArbitrageEngine evaluate", () => {
+  it("never crashes with random snapshots (200 iterations)", () => {
+    // Lazy import to avoid circular issues
+    const { ArbitrageEngine } = require("../src/services/arbitrage-engine");
+    const { RunLogger } = require("../src/services/run-logger");
+    const { join } = require("path");
+    const { mkdirSync, existsSync } = require("fs");
+
+    const logDir = join(process.cwd(), "tests", ".test-logs");
+    if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
+
+    const configs = new Map([
+      ["btc", {
+        tradeAllowedTimeLeft: 750,
+        tradeStopTimeLeft: null,
+        minGap: 0.04,
+        maxSpendTotal: 500,
+        minSpendTotal: 10,
+        maxSpread: null,
+        minDepthValue: null,
+        maxPriceStalenessSec: null,
+        fillUsd: 500,
+      }],
+    ]);
+
+    const logger = new RunLogger(join(logDir, `fuzz-engine-${Date.now()}.log`), 10);
+    const engine = new ArbitrageEngine("fuzzProfile", configs, logger, {
+      kalshiOutcomeClient: {
+        getMarket: async () => null,
+        getMarkets: async () => ({ markets: [] }),
+        searchMarkets: async () => [],
+        getEvent: async () => null,
+      },
+      decisionLatencyMs: 0,
+    });
+
+    for (let i = 0; i < 200; i++) {
+      const now = Date.now() + i * 1000;
+      const snap = randomSnapshot({
+        coin: "btc",
+        upTokenId: "UP_TOKEN",
+        downTokenId: "DOWN_TOKEN",
+      }) as any;
+
+      // Add random order books
+      const ob = new Map();
+      ob.set("UP_TOKEN", {
+        bids: randomBook(randomInt(0, 3)),
+        asks: randomBook(randomInt(0, 5)),
+        lastTrade: 0,
+        totalBidValue: randomFloat(0, 100),
+        totalAskValue: randomFloat(0, 100),
+      });
+      ob.set("DOWN_TOKEN", {
+        bids: randomBook(randomInt(0, 3)),
+        asks: randomBook(randomInt(0, 5)),
+        lastTrade: 0,
+        totalBidValue: randomFloat(0, 100),
+        totalAskValue: randomFloat(0, 100),
+      });
+      snap.orderBooks = ob;
+      snap.bestAsk = new Map([["UP_TOKEN", randomFloat(0.1, 0.9)], ["DOWN_TOKEN", randomFloat(0.1, 0.9)]]);
+      snap.bestBid = new Map([["UP_TOKEN", randomFloat(0.05, 0.85)], ["DOWN_TOKEN", randomFloat(0.05, 0.85)]]);
+
+      const kalshiSnap = randomSnapshot({
+        coin: "btc",
+        provider: "kalshi",
+        upTokenId: "YES",
+        downTokenId: "NO",
+        marketTicker: "KXBTC-FUZZ",
+        slug: "KXBTC-FUZZ",
+      }) as any;
+      const kob = new Map();
+      kob.set("YES", {
+        bids: randomBook(randomInt(0, 3)),
+        asks: randomBook(randomInt(0, 5)),
+        lastTrade: 0,
+        totalBidValue: randomFloat(0, 100),
+        totalAskValue: randomFloat(0, 100),
+      });
+      kob.set("NO", {
+        bids: randomBook(randomInt(0, 3)),
+        asks: randomBook(randomInt(0, 5)),
+        lastTrade: 0,
+        totalBidValue: randomFloat(0, 100),
+        totalAskValue: randomFloat(0, 100),
+      });
+      kalshiSnap.orderBooks = kob;
+      kalshiSnap.bestAsk = new Map([["YES", randomFloat(0.1, 0.9)], ["NO", randomFloat(0.1, 0.9)]]);
+      kalshiSnap.bestBid = new Map([["YES", randomFloat(0.05, 0.85)], ["NO", randomFloat(0.05, 0.85)]]);
+
+      const polyMap = new Map([["btc", snap]]);
+      const kalshiMap = new Map([["btc", kalshiSnap]]);
+
+      // Must never throw
+      expect(() => engine.evaluate(polyMap, kalshiMap, now)).not.toThrow();
+
+      // Summary invariants
+      const summary = engine.getSummary();
+      expect(Number.isFinite(summary.totalProfit)).toBe(true);
+      expect(Number.isFinite(summary.openExposure)).toBe(true);
+      expect(summary.totalTrades).toBeGreaterThanOrEqual(0);
+    }
+  });
+});
+
 // ── Fuzz: market signals ─────────────────────────────────────────
 
 describe("fuzz: market signals", () => {

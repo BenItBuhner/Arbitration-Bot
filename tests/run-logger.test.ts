@@ -1,7 +1,7 @@
 import { describe, expect, it, afterEach } from "bun:test";
 import { RunLogger } from "../src/services/run-logger";
 import { join } from "path";
-import { existsSync, readFileSync, rmSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, rmSync, mkdirSync, statSync } from "fs";
 
 const TEST_DIR = join(process.cwd(), "tests", ".test-log-output");
 
@@ -111,6 +111,27 @@ describe("RunLogger", () => {
     logger.log("default level");
     const content = readFileSync(logPath, "utf8");
     expect(content).toContain("[INFO] default level");
+  });
+
+  it("rotates log file when maxFileBytes exceeded", () => {
+    const logPath = join(TEST_DIR, "test-rotate.log");
+    const rotatedPath = `${logPath}.1`;
+    // Tiny limit: 500 bytes, rotation checks every 500 writes
+    // so we need to write enough to exceed AND hit the check interval
+    const logger = new RunLogger(logPath, 50, { maxFileBytes: 500 });
+
+    // Write enough to exceed 500 bytes (each line is ~60 bytes)
+    // Rotation check happens every 500 writes
+    for (let i = 0; i < 501; i++) {
+      logger.log(`msg-${i}`);
+    }
+
+    // After 501 writes, rotation should have triggered
+    // The rotated file should exist
+    expect(existsSync(rotatedPath)).toBe(true);
+    // The current log file should be fresh (much smaller)
+    const currentStat = statSync(logPath);
+    expect(currentStat.size).toBeLessThan(500);
   });
 });
 
