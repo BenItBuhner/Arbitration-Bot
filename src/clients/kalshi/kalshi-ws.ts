@@ -306,9 +306,14 @@ export class KalshiMarketWS {
     this.ws.send(JSON.stringify(payload));
   }
 
+  /**
+   * Attempt reconnection with exponential backoff.
+   * When reconnectAttempts is -1, retries indefinitely.
+   */
   private attemptReconnect(): void {
     const maxAttempts = this.config.reconnectAttempts ?? 5;
-    if (this.reconnectAttempts >= maxAttempts) {
+    const infinite = maxAttempts < 0;
+    if (!infinite && this.reconnectAttempts >= maxAttempts) {
       this.onError(new Error("Kalshi WebSocket max reconnection attempts reached"));
       return;
     }

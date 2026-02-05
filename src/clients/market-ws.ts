@@ -306,10 +306,13 @@ export class MarketWS {
   }
 
   /**
-   * Attempt to reconnect after connection loss
+   * Attempt to reconnect after connection loss.
+   * When reconnectAttempts is -1, retries indefinitely with exponential backoff.
    */
   private attemptReconnect(): void {
-    if (this.reconnectAttempts >= (this.config.reconnectAttempts || 5)) {
+    const maxAttempts = this.config.reconnectAttempts ?? 5;
+    const infinite = maxAttempts < 0;
+    if (!infinite && this.reconnectAttempts >= maxAttempts) {
       this.onError(new Error("Max reconnection attempts reached"));
       return;
     }
@@ -320,6 +323,11 @@ export class MarketWS {
         Math.pow(2, this.reconnectAttempts - 1),
       30000,
     );
+
+    if (!this.config.silent) {
+      const label = infinite ? "infinite" : `${this.reconnectAttempts}/${maxAttempts}`;
+      console.log(`MarketWS reconnect ${label} in ${delay}ms`);
+    }
 
     setTimeout(() => {
       if (!this.isManuallyClosed) {
@@ -364,6 +372,25 @@ export class MarketWS {
     const allSubs = Array.from(this.subscriptions);
     this.unsubscribe(allSubs);
     this.subscriptions.clear();
+  }
+
+  /**
+   * Replace all current subscriptions with a new set of token IDs.
+   * Unsubscribes removed tokens, subscribes new ones, avoids full reconnect.
+   */
+  replaceSubscriptions(newTokenIds: string[]): void {
+    const newSet = new Set(newTokenIds.filter((id) => id && typeof id === "string"));
+    const oldSet = this.subscriptions;
+
+    const toRemove = Array.from(oldSet).filter((id) => !newSet.has(id));
+    const toAdd = Array.from(newSet).filter((id) => !oldSet.has(id));
+
+    if (toRemove.length > 0) {
+      this.unsubscribe(toRemove);
+    }
+    if (toAdd.length > 0) {
+      this.subscribe(toAdd);
+    }
   }
 }
 

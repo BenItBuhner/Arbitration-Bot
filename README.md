@@ -303,3 +303,44 @@ Both the arbitrage bot and price diff detection use the same execution delay mod
 - `LIVE_SIGNAL_PREP`
 - `AUTO_MARKET_MIN_LIQUIDITY`
 - `AUTO_MARKET_MIN_VOLUME_24H`
+
+### Reliability / WebSocket reconnection (optional)
+All reconnect-attempts vars accept `-1` for infinite retries (recommended for servers).
+
+**Polymarket market WS:**
+- `PM_WS_RECONNECT_ATTEMPTS` (default `-1`)
+- `PM_WS_RECONNECT_DELAY_MS` (default `3000`)
+- `PM_WS_PING_INTERVAL_MS` (default `30000`)
+
+**Polymarket crypto WS:**
+- `CRYPTO_WS_RECONNECT_ATTEMPTS` (default `-1`)
+- `CRYPTO_WS_RECONNECT_DELAY_MS` (default `3000`)
+
+**Kalshi WS:**
+- `KALSHI_WS_RECONNECT_ATTEMPTS` (default `-1`)
+- `KALSHI_WS_RECONNECT_DELAY_MS` (default `3000`)
+
+**Kalshi crypto WS (Chainlink feed):**
+- `KALSHI_CRYPTO_WS_RECONNECT_ATTEMPTS` (default `-1`)
+- `KALSHI_CRYPTO_WS_RECONNECT_DELAY_MS` (default `3000`)
+
+### Data-freshness thresholds (optional)
+Increase these on servers where WS updates are less frequent to reduce false staleness flapping.
+
+**Polymarket:**
+- `PM_BOOK_STALE_MS` (default `10000`) -- order book considered stale after this many ms
+- `PM_BOOK_RESET_MS` (default `25000`) -- trigger WS reset after this many ms stale
+- `PM_WS_RESET_COOLDOWN_MS` (default `15000`) -- min time between WS resets
+- `PM_PRICE_STALE_MS` (default `12000`) -- crypto price considered stale
+- `PM_PRICE_RESET_MS` (default `25000`) -- trigger crypto WS reset
+- `PM_CRYPTO_RESET_COOLDOWN_MS` (default `15000`) -- min time between crypto WS resets
+- `PM_DATA_STARTUP_GRACE_MS` (default `12000`) -- ignore staleness for this long after startup
+- `PM_MARKET_RESELECT_MS` (default `60000`) -- trigger market reselect after this many ms stale
+- `PM_MARKET_RESELECT_COOLDOWN_MS` (default `60000`) -- min time between reselects
+
+**Kalshi:**
+- `KALSHI_BOOK_STALE_MS` (default `10000`)
+- `KALSHI_PRICE_STALE_MS` (default `12000`)
+- `KALSHI_DATA_STARTUP_GRACE_MS` (default `12000`)
+- `KALSHI_MARKET_RESELECT_MS` (default `60000`)
+- `KALSHI_MARKET_RESELECT_COOLDOWN_MS` (default `60000`)

@@ -281,10 +281,13 @@ export class CryptoWS {
   }
 
   /**
-   * Attempt reconnection with exponential backoff
+   * Attempt reconnection with exponential backoff.
+   * When reconnectAttempts is -1, retries indefinitely.
    */
   private attemptReconnect(): void {
-    if (this.reconnectAttempts >= (this.config.reconnectAttempts || 5)) {
+    const maxAttempts = this.config.reconnectAttempts ?? 5;
+    const infinite = maxAttempts < 0;
+    if (!infinite && this.reconnectAttempts >= maxAttempts) {
       this.onError(new Error("Max reconnection attempts reached"));
       return;
     }

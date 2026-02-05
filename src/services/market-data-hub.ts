@@ -20,15 +20,15 @@ import { computeSignals } from "./market-signals";
 import type { MarketProvider } from "../providers/provider";
 
 const MARKET_DURATION_MS = 15 * 60 * 1000;
-const BOOK_STALE_MS = 10000;
-const BOOK_RESET_MS = 25000;
-const WS_RESET_COOLDOWN_MS = 15000;
-const PRICE_STALE_MS = 12000;
-const PRICE_RESET_MS = 25000;
-const CRYPTO_RESET_COOLDOWN_MS = 15000;
-const DATA_STARTUP_GRACE_MS = 12000;
-const MARKET_RESELECT_MS = 60000;
-const MARKET_RESELECT_COOLDOWN_MS = 60000;
+const BOOK_STALE_MS = parseEnvNumber("PM_BOOK_STALE_MS", 10000, 1000);
+const BOOK_RESET_MS = parseEnvNumber("PM_BOOK_RESET_MS", 25000, 5000);
+const WS_RESET_COOLDOWN_MS = parseEnvNumber("PM_WS_RESET_COOLDOWN_MS", 15000, 3000);
+const PRICE_STALE_MS = parseEnvNumber("PM_PRICE_STALE_MS", 12000, 1000);
+const PRICE_RESET_MS = parseEnvNumber("PM_PRICE_RESET_MS", 25000, 5000);
+const CRYPTO_RESET_COOLDOWN_MS = parseEnvNumber("PM_CRYPTO_RESET_COOLDOWN_MS", 15000, 3000);
+const DATA_STARTUP_GRACE_MS = parseEnvNumber("PM_DATA_STARTUP_GRACE_MS", 12000, 3000);
+const MARKET_RESELECT_MS = parseEnvNumber("PM_MARKET_RESELECT_MS", 60000, 10000);
+const MARKET_RESELECT_COOLDOWN_MS = parseEnvNumber("PM_MARKET_RESELECT_COOLDOWN_MS", 60000, 10000);
 const PENDING_RETRY_BASE_MS = 5000;
 const PENDING_RETRY_MAX_MS = 60000;
 const PRICE_HISTORY_LIMIT = 180;
@@ -37,6 +37,13 @@ const SIGNAL_SLIPPAGE_NOTIONAL = 50;
 const SIGNAL_TRADE_WINDOW_MS = 5 * 60 * 1000;
 const REF_RETRY_MS = 30000;
 const REF_MISSING_LOG_MS = 45000;
+
+// WS reconnect config (shared by Polymarket market + crypto WS)
+const PM_WS_RECONNECT_ATTEMPTS = parseEnvNumber("PM_WS_RECONNECT_ATTEMPTS", -1, -1);
+const PM_WS_RECONNECT_DELAY_MS = parseEnvNumber("PM_WS_RECONNECT_DELAY_MS", 3000, 500);
+const PM_WS_PING_INTERVAL_MS = parseEnvNumber("PM_WS_PING_INTERVAL_MS", 30000, 5000);
+const CRYPTO_WS_RECONNECT_ATTEMPTS = parseEnvNumber("CRYPTO_WS_RECONNECT_ATTEMPTS", -1, -1);
+const CRYPTO_WS_RECONNECT_DELAY_MS = parseEnvNumber("CRYPTO_WS_RECONNECT_DELAY_MS", 3000, 500);
 
 function parseEnvFlag(name: string, defaultValue: boolean): boolean {
   const raw = process.env[name];
@@ -405,12 +412,34 @@ export class MarketDataHub {
       (error: Error) => {
         this.logger.log(`DATA: market WS error ${error.message}`, "ERROR");
       },
-      { silent: true },
+      {
+        silent: true,
+        reconnectAttempts: PM_WS_RECONNECT_ATTEMPTS,
+        reconnectDelay: PM_WS_RECONNECT_DELAY_MS,
+        pingInterval: PM_WS_PING_INTERVAL_MS,
+      },
     );
 
     this.marketWs.connect();
     if (tokenIds.length > 0) {
       this.marketWs.subscribe(tokenIds);
+    }
+  }
+
+  /**
+   * Swap subscriptions on the existing MarketWS without tearing down the connection.
+   * Falls back to a full reconnect if the WS is not alive.
+   */
+  private refreshMarketWsSubscriptions(): void {
+    const tokenIds: string[] = [];
+    for (const state of this.states.values()) {
+      tokenIds.push(...state.tokenIds);
+    }
+
+    if (this.marketWs && this.marketWs.isConnected()) {
+      this.marketWs.replaceSubscriptions(tokenIds);
+    } else {
+      this.connectMarketWs();
     }
   }
 
@@ -428,7 +457,11 @@ export class MarketDataHub {
       (error: Error) => {
         this.logger.log(`DATA: crypto WS error ${error.message}`, "ERROR");
       },
-      { source: "chainlink" },
+      {
+        source: "chainlink",
+        reconnectAttempts: CRYPTO_WS_RECONNECT_ATTEMPTS,
+        reconnectDelay: CRYPTO_WS_RECONNECT_DELAY_MS,
+      },
     );
 
     this.cryptoWs.connect();
@@ -878,8 +911,8 @@ export class MarketDataHub {
 
     this.states.set(coin, next);
     this.registerTokenIds(next);
-    this.logger.log(`DATA: ${coin.toUpperCase()} rotating market (WS reset)`);
-    this.connectMarketWs();
+    this.logger.log(`DATA: ${coin.toUpperCase()} rotating market (sub refresh)`);
+    this.refreshMarketWsSubscriptions();
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     }
@@ -905,7 +938,7 @@ export class MarketDataHub {
     this.logger.log(
       `DATA: ${coin.toUpperCase()} market reselected (${next.slug})`,
     );
-    this.connectMarketWs();
+    this.refreshMarketWsSubscriptions();
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     } else {

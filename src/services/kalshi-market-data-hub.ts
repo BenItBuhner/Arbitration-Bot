@@ -25,11 +25,23 @@ import {
 } from "../clients/kalshi/kalshi-url";
 import { fetchKalshiHtmlReference } from "./kalshi-html";
 
-const BOOK_STALE_MS = 10000;
-const PRICE_STALE_MS = 12000;
-const DATA_STARTUP_GRACE_MS = 12000;
-const MARKET_RESELECT_MS = 60000;
-const MARKET_RESELECT_COOLDOWN_MS = 60000;
+function parseEnvNumber(
+  name: string,
+  defaultValue: number,
+  minValue: number,
+): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.max(minValue, parsed);
+}
+
+const BOOK_STALE_MS = parseEnvNumber("KALSHI_BOOK_STALE_MS", 10000, 1000);
+const PRICE_STALE_MS = parseEnvNumber("KALSHI_PRICE_STALE_MS", 12000, 1000);
+const DATA_STARTUP_GRACE_MS = parseEnvNumber("KALSHI_DATA_STARTUP_GRACE_MS", 12000, 3000);
+const MARKET_RESELECT_MS = parseEnvNumber("KALSHI_MARKET_RESELECT_MS", 60000, 10000);
+const MARKET_RESELECT_COOLDOWN_MS = parseEnvNumber("KALSHI_MARKET_RESELECT_COOLDOWN_MS", 60000, 10000);
 const SIGNAL_DEPTH_LEVELS = 3;
 const SIGNAL_SLIPPAGE_NOTIONAL = 50;
 const SIGNAL_TRADE_WINDOW_MS = 5 * 60 * 1000;
@@ -38,6 +50,12 @@ const KALSHI_REF_RETRY_MAX_MS = 120000;
 const KALSHI_HTML_REF_RETRY_BASE_MS = 15000;
 const KALSHI_HTML_REF_RETRY_MAX_MS = 120000;
 const KALSHI_HTML_REF_TIMEOUT_MS = 10000;
+
+// WS reconnect config
+const KALSHI_WS_RECONNECT_ATTEMPTS = parseEnvNumber("KALSHI_WS_RECONNECT_ATTEMPTS", -1, -1);
+const KALSHI_WS_RECONNECT_DELAY_MS = parseEnvNumber("KALSHI_WS_RECONNECT_DELAY_MS", 3000, 500);
+const KALSHI_CRYPTO_WS_RECONNECT_ATTEMPTS = parseEnvNumber("KALSHI_CRYPTO_WS_RECONNECT_ATTEMPTS", -1, -1);
+const KALSHI_CRYPTO_WS_RECONNECT_DELAY_MS = parseEnvNumber("KALSHI_CRYPTO_WS_RECONNECT_DELAY_MS", 3000, 500);
 
 const COIN_CONFIG: Record<CoinSymbol, { name: string; symbol: string }> = {
   eth: { name: "Ethereum", symbol: "eth/usd" },
@@ -865,7 +883,11 @@ export class KalshiMarketDataHub {
       (error: Error) => {
         this.logger.log(`DATA: Kalshi WS error ${error.message}`, "ERROR");
       },
-      { silent: true },
+      {
+        silent: true,
+        reconnectAttempts: KALSHI_WS_RECONNECT_ATTEMPTS,
+        reconnectDelayMs: KALSHI_WS_RECONNECT_DELAY_MS,
+      },
     );
 
     this.kalshiWs.connect();
@@ -886,8 +908,11 @@ export class KalshiMarketDataHub {
       (error: Error) => {
         this.logger.log(`DATA: crypto WS error ${error.message}`, "ERROR");
       },
-      // TODO: Replace Polymarket RTDS with Kalshi-native spot pricing.
-      { source: "chainlink" },
+      {
+        source: "chainlink",
+        reconnectAttempts: KALSHI_CRYPTO_WS_RECONNECT_ATTEMPTS,
+        reconnectDelay: KALSHI_CRYPTO_WS_RECONNECT_DELAY_MS,
+      },
     );
 
     this.cryptoWs.connect();
