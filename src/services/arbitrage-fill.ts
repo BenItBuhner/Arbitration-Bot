@@ -18,7 +18,13 @@ export function randomDelayMs(minMs: number, maxMs: number): number {
 
 export function normalizeAsks(levels: OrderBookLevel[]): OrderBookLevel[] {
   return levels
-    .filter((level) => Number.isFinite(level.price) && level.price > 0)
+    .filter(
+      (level) =>
+        Number.isFinite(level.price) &&
+        level.price > 0 &&
+        Number.isFinite(level.size) &&
+        level.size > 0,
+    )
     .map((level) => ({
       price: level.price,
       size: Math.max(0, Math.floor(level.size)),
