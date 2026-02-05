@@ -485,4 +485,21 @@ const run = async () => {
   }
 };
 
+// Global error handlers to prevent silent crashes
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  console.error(`[FATAL] Unhandled rejection: ${message}`);
+  if (reason instanceof Error && reason.stack) {
+    console.error(reason.stack);
+  }
+});
+
+process.on("uncaughtException", (error) => {
+  console.error(`[FATAL] Uncaught exception: ${error.message}`);
+  if (error.stack) {
+    console.error(error.stack);
+  }
+  process.exit(1);
+});
+
 void run();
