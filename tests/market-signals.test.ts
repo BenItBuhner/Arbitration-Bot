@@ -114,7 +114,24 @@ describe("computeSignals", () => {
       priceHistory: [50000, NaN, 50200, Infinity, 50100],
     });
     // Should not throw
-    expect(() => computeSignals(input, Date.now())).not.toThrow();
+    const result = computeSignals(input, Date.now());
+    expect(result).toBeDefined();
+    // Momentum should be finite or null, never NaN
+    if (result.priceMomentum !== null) {
+      expect(Number.isFinite(result.priceMomentum)).toBe(true);
+    }
+    // Volatility should be finite or null, never NaN
+    if (result.priceVolatility !== null) {
+      expect(Number.isFinite(result.priceVolatility)).toBe(true);
+    }
+  });
+
+  it("returns null momentum for all-NaN price history", () => {
+    const input = makeInput({
+      priceHistory: [NaN, NaN, NaN],
+    });
+    const result = computeSignals(input, Date.now());
+    expect(result.priceMomentum).toBeNull();
   });
 
   it("computes book imbalance correctly", () => {
