@@ -896,9 +896,15 @@ export class MarketDataHub {
       staleMs >= BOOK_RESET_MS || selectedMs >= BOOK_RESET_MS;
     if (!shouldReset) return;
 
-    // If the WS is still connected, the market is just quiet -- skip the
-    // destructive full reconnect that would kill subscriptions for ALL coins.
+    // If the WS is still connected, try refreshing subscriptions instead of
+    // a destructive full reconnect that would kill subscriptions for ALL coins.
     if (this.marketWs?.isConnected()) {
+      this.logger.log(
+        `DATA: ${state.coin.toUpperCase()} WS connected but book stale -- refreshing subscriptions`,
+        "WARN",
+      );
+      this.refreshMarketWsSubscriptions();
+      this.lastWsResetMs = now;
       return;
     }
 
@@ -919,8 +925,13 @@ export class MarketDataHub {
       staleMs >= PRICE_RESET_MS || selectedMs >= PRICE_RESET_MS;
     if (!shouldReset) return;
 
-    // If the crypto WS is still connected, skip the full reconnect.
+    // If the crypto WS is still connected, try re-subscribing instead of full reconnect.
     if (this.cryptoWs?.isConnected()) {
+      const symbols = Array.from(this.states.values()).map((s) => s.symbol);
+      if (symbols.length > 0) {
+        this.cryptoWs.subscribe(symbols);
+      }
+      this.lastCryptoWsResetMs = now;
       return;
     }
 
