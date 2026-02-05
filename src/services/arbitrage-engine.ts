@@ -1136,6 +1136,10 @@ export class ArbitrageEngine {
       kalshiCloseTimeIso: kalshiCloseIso,
       polyDataStatus: position.polySnap.dataStatus,
       kalshiDataStatus: position.kalshiSnap.dataStatus,
+      thresholdDivergencePct:
+        polyThreshold && kalshiThreshold && polyThreshold > 0 && kalshiThreshold > 0
+          ? ((Math.abs(polyThreshold - kalshiThreshold) / Math.min(polyThreshold, kalshiThreshold)) * 100).toFixed(4)
+          : null,
     };
 
     this.mismatchLogger.log(
