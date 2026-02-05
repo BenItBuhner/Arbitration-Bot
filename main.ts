@@ -42,6 +42,7 @@ interface CLIArgs {
   realisticFill?: boolean;
   fillUsd?: number;
   help?: boolean;
+  validate?: boolean;
 }
 
 function normalizeMode(value: string | undefined): CLIMode | undefined {
@@ -143,6 +144,11 @@ function parseArgs(argv: string[]): CLIArgs {
 
     if (raw === "--headless") {
       args.headless = true;
+      continue;
+    }
+
+    if (raw === "--validate" || raw === "--check") {
+      args.validate = true;
       continue;
     }
 
@@ -366,6 +372,7 @@ function printUsage(): void {
     "  --fill-usd <amount>       (price-diff-detection: USD budget for fill simulation)",
     "  --start <iso|ms>           (backtest)",
     "  --end <iso|ms>             (backtest)",
+    "  --validate               (check config, env vars, and API connectivity)",
     "  --help",
   ];
   console.log(lines.join("\n"));
@@ -389,9 +396,120 @@ if (cliArgs.provider) {
   process.env.MARKET_PROVIDER = cliArgs.provider;
 }
 
+async function runValidation(): Promise<void> {
+  console.log("=== Arbitrage Bot Validation ===\n");
+  let issues = 0;
+  let warnings = 0;
+
+  // 1. Config file
+  try {
+    const { loadArbitrageConfig } = await import("./src/services/arbitrage-config");
+    const config = loadArbitrageConfig();
+    console.log(`[OK] config.json: ${config.profiles.length} profile(s), coins: ${config.coinOptions.join(", ")}`);
+    for (const profile of config.profiles) {
+      const coins = Array.from(profile.coins.keys());
+      console.log(`     Profile "${profile.name}": ${coins.join(", ")}`);
+      for (const [coin, cfg] of profile.coins) {
+        if (cfg.fillUsd && cfg.fillUsd > cfg.maxSpendTotal) {
+          console.log(`  [WARN] ${profile.name}/${coin}: fillUsd (${cfg.fillUsd}) > maxSpendTotal (${cfg.maxSpendTotal})`);
+          warnings++;
+        }
+      }
+    }
+  } catch (err) {
+    console.log(`[FAIL] config.json: ${err instanceof Error ? err.message : "load failed"}`);
+    issues++;
+  }
+
+  // 2. Provider configs
+  try {
+    const { loadProviderConfig } = await import("./src/services/profile-config");
+    const poly = loadProviderConfig("polymarket");
+    console.log(`[OK] Polymarket config: coins=${poly.coinOptions.join(", ")}`);
+  } catch (err) {
+    console.log(`[FAIL] Polymarket config: ${err instanceof Error ? err.message : "load failed"}`);
+    issues++;
+  }
+
+  try {
+    const { loadProviderConfig } = await import("./src/services/profile-config");
+    const kalshi = loadProviderConfig("kalshi");
+    console.log(`[OK] Kalshi config: coins=${kalshi.coinOptions.join(", ")}, selectors=${kalshi.kalshiSelectorsByCoin?.size ?? 0}`);
+  } catch (err) {
+    console.log(`[FAIL] Kalshi config: ${err instanceof Error ? err.message : "load failed"}`);
+    issues++;
+  }
+
+  // 3. Environment variables
+  const kalshiKey = process.env.KALSHI_API_KEY;
+  const kalshiKeyPath = process.env.KALSHI_PRIVATE_KEY_PATH;
+  const kalshiKeyPem = process.env.KALSHI_PRIVATE_KEY_PEM;
+  const kalshiEnv = process.env.KALSHI_ENV || "demo";
+
+  if (kalshiKey) {
+    console.log(`[OK] KALSHI_API_KEY: set (${kalshiKey.slice(0, 8)}...)`);
+  } else {
+    console.log("[FAIL] KALSHI_API_KEY: not set");
+    issues++;
+  }
+
+  if (kalshiKeyPath) {
+    const { existsSync } = await import("fs");
+    if (existsSync(kalshiKeyPath)) {
+      console.log(`[OK] KALSHI_PRIVATE_KEY_PATH: ${kalshiKeyPath} (exists)`);
+    } else {
+      console.log(`[FAIL] KALSHI_PRIVATE_KEY_PATH: ${kalshiKeyPath} (FILE NOT FOUND)`);
+      issues++;
+    }
+  } else if (kalshiKeyPem) {
+    console.log(`[OK] KALSHI_PRIVATE_KEY_PEM: set (${kalshiKeyPem.length} chars)`);
+  } else {
+    console.log("[FAIL] Neither KALSHI_PRIVATE_KEY_PATH nor KALSHI_PRIVATE_KEY_PEM set");
+    issues++;
+  }
+
+  console.log(`[INFO] KALSHI_ENV: ${kalshiEnv}`);
+
+  // 4. Kalshi auth test
+  if (kalshiKey && (kalshiKeyPath || kalshiKeyPem)) {
+    try {
+      const { getKalshiEnvConfig } = await import("./src/clients/kalshi/kalshi-config");
+      const config = getKalshiEnvConfig();
+      console.log(`[OK] Kalshi auth config: baseUrl=${config.baseUrl}`);
+
+      // Try a basic API call
+      try {
+        const { KalshiClient } = await import("./src/clients/kalshi/kalshi-client");
+        const client = new KalshiClient(config);
+        const markets = await client.getMarkets({ limit: 1, status: "open" });
+        console.log(`[OK] Kalshi API connectivity: ${markets.markets.length > 0 ? "working" : "no markets found"}`);
+      } catch (apiErr) {
+        console.log(`[WARN] Kalshi API test: ${apiErr instanceof Error ? apiErr.message : "failed"}`);
+        warnings++;
+      }
+    } catch (err) {
+      console.log(`[FAIL] Kalshi auth: ${err instanceof Error ? err.message : "failed"}`);
+      issues++;
+    }
+  }
+
+  // 5. Summary
+  console.log(`\n=== Summary: ${issues} issue(s), ${warnings} warning(s) ===`);
+  if (issues === 0) {
+    console.log("Ready to run. Use --mode fake-trade --profiles arbBotV1 --coins all --headless");
+  } else {
+    console.log("Fix the issues above before running.");
+  }
+}
+
 const run = async () => {
   if (cliArgs.help) {
     printUsage();
+    return;
+  }
+
+  if (cliArgs.validate) {
+    await runValidation();
     return;
   }
 
