@@ -745,7 +745,7 @@ export async function fakeTradeRouteWithOptions(
     }
   }, 250);
 
-  process.on("SIGINT", () => {
+  const gracefulShutdown = (signal: string) => {
     clearInterval(evalTimer);
     clearInterval(renderTimer);
     cleanupNavigation();
@@ -754,13 +754,16 @@ export async function fakeTradeRouteWithOptions(
     for (const engine of profileEngines) {
       const summary = engine.getSummary();
       systemLogger.log(
-        `SHUTDOWN: ${engine.getName()} trades=${summary.totalTrades} wins=${summary.wins} losses=${summary.losses} profit=${summary.totalProfit.toFixed(2)} runtime=${summary.runtimeSec.toFixed(0)}s`,
+        `SHUTDOWN(${signal}): ${engine.getName()} trades=${summary.totalTrades} wins=${summary.wins} losses=${summary.losses} profit=${summary.totalProfit.toFixed(2)} runtime=${summary.runtimeSec.toFixed(0)}s`,
       );
     }
-    systemLogger.log("SHUTDOWN: graceful exit");
+    systemLogger.log(`SHUTDOWN(${signal}): graceful exit`);
 
     polyHub.stop();
     kalshiHub.stop();
     process.exit(0);
-  });
+  };
+
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 }
