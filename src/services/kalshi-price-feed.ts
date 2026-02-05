@@ -107,12 +107,15 @@ export class KalshiPriceFeed {
       const market = await this.client.getMarket(this.marketTicker);
       const rawLast = extractCents((market as any)?.last_price)
         ?? extractCents((market as any)?.last_price_dollars);
-      if (rawLast !== null) {
-        this.lastPrice = normalizePrice(rawLast);
-        const ts = (market as any)?.last_price_ts ?? (market as any)?.last_trade_ts;
-        this.lastTs = typeof ts === "number" && ts > 0
-          ? (ts >= 1e12 ? ts : ts * 1000)
-          : Date.now();
+      if (rawLast !== null && Number.isFinite(rawLast) && rawLast >= 0) {
+        const normalized = normalizePrice(rawLast);
+        if (Number.isFinite(normalized) && normalized >= 0 && normalized <= 1) {
+          this.lastPrice = normalized;
+          const ts = (market as any)?.last_price_ts ?? (market as any)?.last_trade_ts;
+          this.lastTs = typeof ts === "number" && ts > 0
+            ? (ts >= 1e12 ? ts : ts * 1000)
+            : Date.now();
+        }
       }
 
       const endTs = Math.floor(Date.now() / 1000);

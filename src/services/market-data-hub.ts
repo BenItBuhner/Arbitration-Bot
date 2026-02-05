@@ -1030,6 +1030,11 @@ export class MarketDataHub {
         } else {
           this.connectCryptoWs();
         }
+      } catch (err) {
+        this.logger.log(
+          `DATA: ${coin.toUpperCase()} retry market init errored: ${err instanceof Error ? err.message : "unknown"}`,
+          "ERROR",
+        );
       } finally {
         this.rotatingCoins.delete(coin);
       }
