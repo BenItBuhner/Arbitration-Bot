@@ -986,6 +986,78 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("screenshot scenario: Kalshi threshold n/a + stale data", () => {
+    it("does not enter trade when Kalshi threshold is missing (exact screenshot issue)", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+
+      // Exact scenario from user screenshot:
+      // Poly Threshold: 63902.51, Kalshi Threshold: n/a, Status: stale
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        priceToBeat: 63902.51,
+        referencePrice: 63902.51,
+        referenceSource: "price_to_beat",
+        dataStatus: "healthy",
+      });
+      const kalshiSnap = makeKalshiSnap({
+        timeLeftSec: 600,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        dataStatus: "healthy",
+        // All asks present (Kalshi Y/N 0.6300/0.3900)
+      });
+      kalshiSnap.bestAsk.set("YES", 0.63);
+      kalshiSnap.bestAsk.set("NO", 0.39);
+
+      // Should NOT enter a trade
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now() + 1);
+      expect(engine.getSummary().totalTrades).toBe(0);
+
+      // Verify no pending orders either
+      const views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).toBeNull();
+      expect(views[0]!.position).toBeNull();
+    });
+
+    it("enters trade after Kalshi threshold becomes available", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+
+      // Phase 1: Kalshi threshold missing -- no trade
+      const polySnap = makePolySnap({
+        timeLeftSec: 600,
+        priceToBeat: 63902.51,
+        dataStatus: "healthy",
+      });
+      const kalshiSnapMissing = makeKalshiSnap({
+        timeLeftSec: 600,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+        dataStatus: "healthy",
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapMissing), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapMissing), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(0);
+
+      // Phase 2: Kalshi threshold refreshes -- trade allowed
+      const kalshiSnapFixed = makeKalshiSnap({
+        timeLeftSec: 590,
+        priceToBeat: 63902.51,
+        referencePrice: 63902.51,
+        referenceSource: "price_to_beat",
+        dataStatus: "healthy",
+      });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapFixed), now + 300);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapFixed), now + 301);
+      expect(engine.getSummary().totalTrades).toBe(1);
+    });
+  });
+
   describe("data status rendering", () => {
     it("reports stale when either snapshot is stale", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });
