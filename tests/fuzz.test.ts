@@ -17,7 +17,13 @@ import {
 } from "../src/services/outcome-resolution";
 import { parseStrikePrice } from "../src/services/kalshi-market-data-hub";
 import { computeSignals, type SignalInput } from "../src/services/market-signals";
+import { ArbitrageEngine } from "../src/services/arbitrage-engine";
+import type { ArbitrageCoinConfig } from "../src/services/arbitrage-config";
+import { RunLogger } from "../src/services/run-logger";
 import type { MarketSnapshot } from "../src/services/market-data-hub";
+import type { CoinSymbol } from "../src/services/auto-market";
+import { join } from "path";
+import { mkdirSync, existsSync } from "fs";
 
 // ── Random generators ────────────────────────────────────────────
 
@@ -209,16 +215,10 @@ describe("fuzz: outcome resolution", () => {
 
 describe("fuzz: ArbitrageEngine evaluate", () => {
   it("never crashes with random snapshots (200 iterations)", () => {
-    // Lazy import to avoid circular issues
-    const { ArbitrageEngine } = require("../src/services/arbitrage-engine");
-    const { RunLogger } = require("../src/services/run-logger");
-    const { join } = require("path");
-    const { mkdirSync, existsSync } = require("fs");
-
     const logDir = join(process.cwd(), "tests", ".test-logs");
     if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
 
-    const configs = new Map([
+    const configs = new Map<CoinSymbol, ArbitrageCoinConfig>([
       ["btc", {
         tradeAllowedTimeLeft: 750,
         tradeStopTimeLeft: null,
@@ -239,7 +239,7 @@ describe("fuzz: ArbitrageEngine evaluate", () => {
         getMarkets: async () => ({ markets: [] }),
         searchMarkets: async () => [],
         getEvent: async () => null,
-      },
+      } as any,
       decisionLatencyMs: 0,
     });
 
@@ -298,8 +298,8 @@ describe("fuzz: ArbitrageEngine evaluate", () => {
       kalshiSnap.bestAsk = new Map([["YES", randomFloat(0.1, 0.9)], ["NO", randomFloat(0.1, 0.9)]]);
       kalshiSnap.bestBid = new Map([["YES", randomFloat(0.05, 0.85)], ["NO", randomFloat(0.05, 0.85)]]);
 
-      const polyMap = new Map([["btc", snap]]);
-      const kalshiMap = new Map([["btc", kalshiSnap]]);
+      const polyMap = new Map<CoinSymbol, MarketSnapshot>([["btc", snap as MarketSnapshot]]);
+      const kalshiMap = new Map<CoinSymbol, MarketSnapshot>([["btc", kalshiSnap as MarketSnapshot]]);
 
       // Must never throw
       expect(() => engine.evaluate(polyMap, kalshiMap, now)).not.toThrow();
