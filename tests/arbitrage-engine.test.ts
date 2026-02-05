@@ -862,6 +862,130 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("full lifecycle integration", () => {
+    it("simulates complete market cycle: open → trade → close → resolve", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 50 });
+      const now = Date.now();
+      const closeTime = now + 600_000;
+
+      // Phase 1: Market open, within trading window
+      const polyOpen = makePolySnap({
+        timeLeftSec: 500,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        cryptoPrice: 50100,
+      });
+      const kalshiOpen = makeKalshiSnap({
+        timeLeftSec: 500,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        cryptoPrice: 50100,
+        kalshiUnderlyingValue: 50100,
+      });
+
+      // First eval: candidate detected, pending order created
+      engine.evaluate(makeSnapMap(polyOpen), makeSnapMap(kalshiOpen), now);
+      let views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).not.toBeNull();
+      expect(views[0]!.position).toBeNull();
+      expect(views[0]!.pendingDelayMs).toBe(50);
+
+      // Phase 2: Still pending (25ms into 50ms delay)
+      engine.evaluate(makeSnapMap(polyOpen), makeSnapMap(kalshiOpen), now + 25);
+      views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).not.toBeNull();
+      expect(views[0]!.position).toBeNull();
+
+      // Phase 3: Delay expires, position confirmed
+      engine.evaluate(makeSnapMap(polyOpen), makeSnapMap(kalshiOpen), now + 51);
+      views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).toBeNull();
+      expect(views[0]!.position).not.toBeNull();
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Phase 4: Market closes, price was above threshold (UP)
+      const polyClosed = makePolySnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        cryptoPrice: 50200,
+        priceHistoryWithTs: [
+          { price: 50100, ts: closeTime - 50000 },
+          { price: 50150, ts: closeTime - 30000 },
+          { price: 50200, ts: closeTime - 10000 },
+        ],
+      });
+      const kalshiClosed = makeKalshiSnap({
+        timeLeftSec: -1,
+        marketCloseTimeMs: closeTime,
+        priceToBeat: 50000,
+        cryptoPrice: 50200,
+        kalshiUnderlyingValue: 50200,
+        kalshiUnderlyingTs: closeTime - 5000,
+        priceHistoryWithTs: [
+          { price: 50100, ts: closeTime - 50000 },
+          { price: 50150, ts: closeTime - 30000 },
+          { price: 50200, ts: closeTime - 10000 },
+        ],
+      });
+
+      // Evaluate well after close + grace period
+      const resolveTime = closeTime + 400_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(
+          makeSnapMap(polyClosed),
+          makeSnapMap(kalshiClosed),
+          resolveTime + i * 100,
+        );
+      }
+
+      // Phase 5: Position should be resolved
+      views = engine.getMarketViews();
+      expect(views[0]!.position).toBeNull();
+      const summary = engine.getSummary();
+      expect(summary.totalTrades).toBe(1);
+      expect(summary.wins + summary.losses).toBe(1);
+      expect(views[0]!.lastResult).not.toBeNull();
+      // Since price 50200 > threshold 50000, outcome is UP
+      // The trade was upNo (buy poly UP + buy kalshi NO)
+      // UP outcome means poly UP wins (payout), kalshi NO loses
+      // So this should be reflected in the result
+    });
+
+    it("handles rapid market transitions without crashing", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+
+      // Rapidly alternate between different market states
+      for (let i = 0; i < 50; i++) {
+        const timeLeft = 600 - i * 20;
+        const priceToBeat = timeLeft > 0 ? 50000 : 0;
+        const polySnap = makePolySnap({
+          timeLeftSec: timeLeft,
+          priceToBeat,
+          cryptoPrice: 50000 + Math.sin(i) * 500,
+          dataStatus: i % 7 === 0 ? "stale" : "healthy",
+        });
+        const kalshiSnap = makeKalshiSnap({
+          timeLeftSec: timeLeft,
+          priceToBeat,
+          cryptoPrice: 50000 + Math.sin(i) * 500,
+          dataStatus: i % 11 === 0 ? "stale" : "healthy",
+        });
+
+        // Should never throw regardless of data state
+        expect(() => {
+          engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + i * 1000);
+        }).not.toThrow();
+      }
+
+      // Engine should still be in a valid state
+      const summary = engine.getSummary();
+      expect(summary.runtimeSec).toBeGreaterThan(0);
+      expect(summary.totalTrades).toBeGreaterThanOrEqual(0);
+    });
+  });
+
   describe("data status rendering", () => {
     it("reports stale when either snapshot is stale", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });
