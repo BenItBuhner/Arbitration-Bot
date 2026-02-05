@@ -755,8 +755,12 @@ export class KalshiMarketDataHub {
       if (fetched) {
         detailedMarket = fetched as Record<string, unknown>;
       }
-    } catch {
+    } catch (err) {
       detailedMarket = null;
+      this.logger.log(
+        `DATA: Kalshi detailed market fetch failed for ${selectedTicker}: ${err instanceof Error ? err.message : "unknown"}`,
+        "WARN",
+      );
     }
 
     const marketData = detailedMarket
@@ -793,6 +797,13 @@ export class KalshiMarketDataHub {
     if (strike <= 0 && underlyingValue !== null && underlyingValue > 0) {
       referencePrice = underlyingValue;
       referenceSource = "kalshi_underlying";
+    }
+
+    if (strike <= 0 && (underlyingValue === null || underlyingValue <= 0)) {
+      this.logger.log(
+        `DATA: Kalshi ${coin.toUpperCase()} ${selectedTicker} threshold unavailable at init (strike=0, underlying=${underlyingValue ?? "null"}) -- will retry via refresh`,
+        "WARN",
+      );
     }
 
     const state: KalshiMarketState = {
