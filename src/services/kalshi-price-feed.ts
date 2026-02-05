@@ -174,9 +174,16 @@ export class KalshiPriceFeed {
   /** Start background polling. */
   start(): void {
     if (this.intervalId != null) return;
-    this.refresh();
+    // Initial fetch -- catch to prevent unhandled rejection on startup
+    this.refresh().catch(() => {
+      // Will retry on next poll interval
+    });
     this.intervalId = setInterval(() => {
-      if (!this.isCacheFresh()) this.refresh();
+      if (!this.isCacheFresh()) {
+        this.refresh().catch(() => {
+          // Will retry on next poll interval
+        });
+      }
     }, POLL_INTERVAL_MS);
   }
 

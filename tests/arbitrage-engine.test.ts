@@ -986,6 +986,92 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("direction selection edge cases", () => {
+    it("selects direction with higher gap", () => {
+      // Create asymmetric books: upNo has 0.10 gap, downYes has 0.05 gap
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+
+      const polySnap = makePolySnap({ timeLeftSec: 600 });
+      // Make UP token (poly side of upNo) cheaper than DOWN token (poly side of downYes)
+      polySnap.orderBooks.set("UP_TOKEN", makeOrderBook([{ price: 0.35, size: 500 }]));
+      polySnap.bestAsk.set("UP_TOKEN", 0.35);
+      polySnap.orderBooks.set("DOWN_TOKEN", makeOrderBook([{ price: 0.50, size: 500 }]));
+      polySnap.bestAsk.set("DOWN_TOKEN", 0.50);
+
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600 });
+      // NO token (kalshi side of upNo) = 0.50, YES token (kalshi side of downYes) = 0.50
+      kalshiSnap.orderBooks.set("NO", makeOrderBook([{ price: 0.50, size: 500 }]));
+      kalshiSnap.bestAsk.set("NO", 0.50);
+      kalshiSnap.orderBooks.set("YES", makeOrderBook([{ price: 0.50, size: 500 }]));
+      kalshiSnap.bestAsk.set("YES", 0.50);
+
+      const now = Date.now();
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      const views = engine.getMarketViews();
+      // upNo gap = 1 - (0.35 + 0.50) = 0.15
+      // downYes gap = 1 - (0.50 + 0.50) = 0.00
+      // Should select upNo (higher gap)
+      expect(views[0]!.selectedDirection).toBe("upNo");
+    });
+
+    it("still computes estimates when data status is healthy but time not in window", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const polySnap = makePolySnap({ timeLeftSec: 800, dataStatus: "healthy" });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 800, dataStatus: "healthy" });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      const views = engine.getMarketViews();
+      // Should have estimates even though trade window hasn't opened
+      expect(views[0]!.estimateUpNo).not.toBeNull();
+      expect(views[0]!.estimateDownYes).not.toBeNull();
+      // But should NOT have selected direction (no trade)
+      expect(views[0]!.pendingDirection).toBeNull();
+    });
+  });
+
+  describe("display estimate fallback", () => {
+    it("uses best_ask when order book is empty but bestAsk is set", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+
+      // Set up snapshots with bestAsk values but EMPTY order books
+      const polySnap = makePolySnap({ timeLeftSec: 800 });
+      polySnap.orderBooks.clear(); // Remove all order books
+      polySnap.bestAsk.set("UP_TOKEN", 0.40);
+      polySnap.bestAsk.set("DOWN_TOKEN", 0.55);
+
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 800 });
+      kalshiSnap.orderBooks.clear();
+      kalshiSnap.bestAsk.set("NO", 0.50);
+      kalshiSnap.bestAsk.set("YES", 0.55);
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      const views = engine.getMarketViews();
+      // Should fall back to best_ask source
+      if (views[0]!.estimateUpNo) {
+        expect(views[0]!.estimateUpNoSource).toBe("best_ask");
+      }
+    });
+
+    it("returns null estimates when no ask data at all", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+
+      const polySnap = makePolySnap({ timeLeftSec: 800 });
+      polySnap.orderBooks.clear();
+      polySnap.bestAsk.clear();
+      polySnap.bestBid.clear();
+
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 800 });
+      kalshiSnap.orderBooks.clear();
+      kalshiSnap.bestAsk.clear();
+      kalshiSnap.bestBid.clear();
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), Date.now());
+      const views = engine.getMarketViews();
+      expect(views[0]!.estimateUpNo).toBeNull();
+      expect(views[0]!.estimateDownYes).toBeNull();
+    });
+  });
+
   describe("screenshot scenario: Kalshi threshold n/a + stale data", () => {
     it("does not enter trade when Kalshi threshold is missing (exact screenshot issue)", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });

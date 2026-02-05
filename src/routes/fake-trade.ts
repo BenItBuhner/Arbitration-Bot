@@ -470,8 +470,21 @@ export async function fakeTradeRouteWithOptions(
     { requireCryptoPrice: false },
   );
 
-  await polyHub.start(resolvedCoins);
-  await kalshiHub.start(resolvedCoins);
+  try {
+    await polyHub.start(resolvedCoins);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Polymarket hub start failed: ${msg}`, "ERROR");
+    // Continue -- partial data is better than no data
+  }
+
+  try {
+    await kalshiHub.start(resolvedCoins);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Kalshi hub start failed: ${msg}`, "ERROR");
+    // Continue -- partial data is better than no data
+  }
 
   // ── Startup health check ──────────────────────────────────────
   systemLogger.log(
