@@ -458,6 +458,7 @@ export async function fakeTradeRouteWithOptions(
     kalshiConfig = getKalshiEnvConfig();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Kalshi config error.";
+    systemLogger.log(`STARTUP: ${message}`, "ERROR");
     console.log(message);
     return;
   }

@@ -219,12 +219,20 @@ export class KalshiMarketWS {
       // Keep default path
     }
 
-    const headers = createKalshiAuthHeaders({
-      apiKey: this.kalshiConfig.apiKey,
-      privateKeyPem: this.privateKeyPem,
-      method: "GET",
-      path: wsPath,
-    });
+    let headers: Record<string, string>;
+    try {
+      headers = createKalshiAuthHeaders({
+        apiKey: this.kalshiConfig.apiKey,
+        privateKeyPem: this.privateKeyPem,
+        method: "GET",
+        path: wsPath,
+      });
+    } catch (authErr) {
+      this.onError(
+        new Error(`Kalshi auth header creation failed: ${authErr instanceof Error ? authErr.message : "unknown"}`),
+      );
+      return;
+    }
 
     try {
       const ws = new (WebSocket as any)(this.kalshiConfig.wsUrl, {
