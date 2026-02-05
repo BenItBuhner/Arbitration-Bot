@@ -140,6 +140,17 @@ export class CryptoWS {
     ) {
       const payload = data.payload as CryptoPricePayload;
 
+      // Validate payload has required fields
+      if (
+        !payload ||
+        typeof payload.symbol !== "string" ||
+        !payload.symbol ||
+        typeof payload.value !== "number" ||
+        !Number.isFinite(payload.value)
+      ) {
+        return;
+      }
+
       // Normalize symbol format (e.g., "eth/usd" -> "ETH/USD")
       payload.symbol = payload.symbol.toUpperCase().replace("/", "/");
 

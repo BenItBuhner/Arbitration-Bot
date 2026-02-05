@@ -94,6 +94,8 @@ function normalizeLevels(raw: unknown, useDollars: boolean): KalshiOrderbookLeve
     const price = useDollars ? toNumber(priceRaw) : normalizePriceDollars(priceRaw, null);
     const size = toNumber(sizeRaw);
     if (price === null || size === null) continue;
+    if (!Number.isFinite(price) || price < 0) continue;
+    if (!Number.isFinite(size) || size < 0) continue;
     levels.push({ price, size });
   }
   return levels;

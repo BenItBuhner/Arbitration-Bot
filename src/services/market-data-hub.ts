@@ -808,8 +808,8 @@ export class MarketDataHub {
     state.lastReferenceAttemptMs = Date.now();
     state.referenceAttempts += 1;
 
-    fetchHistoricalCryptoPrice(state.symbol, new Date(state.marketStartMs)).then(
-      (historical) => {
+    fetchHistoricalCryptoPrice(state.symbol, new Date(state.marketStartMs))
+      .then((historical) => {
         if (historical && state.referencePrice === 0) {
           state.referencePrice = historical.price;
           state.referencePriceTimestamp = historical.timestamp;
@@ -825,8 +825,13 @@ export class MarketDataHub {
             "WARN",
           );
         }
-      },
-    );
+      })
+      .catch((err) => {
+        this.logger.log(
+          `DATA: ${state.coin.toUpperCase()} reference fetch errored: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
+      });
   }
 
   private isBookFresh(state: MarketDataState, now: number): boolean {
