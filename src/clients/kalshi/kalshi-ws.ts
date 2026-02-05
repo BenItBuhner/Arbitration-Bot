@@ -235,6 +235,9 @@ export class KalshiMarketWS {
       ws.onopen = () => {
         this.reconnectAttempts = 0;
         this.lastMessageMs = Date.now();
+        // Clear stale orderbook state -- fresh snapshots will arrive
+        // after re-subscribing. Keeping old state would be misleading.
+        this.orderbooks.clear();
         this.startPing();
         this.onConnectionChange(true);
         if (this.subscriptions.size > 0) {

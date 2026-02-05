@@ -748,6 +748,16 @@ export async function fakeTradeRouteWithOptions(
     clearInterval(evalTimer);
     clearInterval(renderTimer);
     cleanupNavigation();
+
+    // Log final summary before shutdown
+    for (const engine of profileEngines) {
+      const summary = engine.getSummary();
+      systemLogger.log(
+        `SHUTDOWN: ${engine.getName()} trades=${summary.totalTrades} wins=${summary.wins} losses=${summary.losses} profit=${summary.totalProfit.toFixed(2)} runtime=${summary.runtimeSec.toFixed(0)}s`,
+      );
+    }
+    systemLogger.log("SHUTDOWN: graceful exit");
+
     polyHub.stop();
     kalshiHub.stop();
     process.exit(0);
