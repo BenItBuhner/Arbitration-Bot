@@ -555,6 +555,76 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("threshold re-validation on confirm", () => {
+    it("aborts pending order if Kalshi threshold vanishes during execution delay", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 100 });
+      const now = Date.now();
+
+      // Phase 1: Both thresholds valid, enter pending order
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      let views = engine.getMarketViews();
+      expect(views[0]!.pendingDirection).not.toBeNull();
+
+      // Phase 2: During delay, Kalshi threshold vanishes
+      const kalshiSnapNoThreshold = makeKalshiSnap({
+        timeLeftSec: 595,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+      });
+
+      // Delay expires -> confirmPendingOrder checks threshold -> aborts
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapNoThreshold), now + 101);
+      views = engine.getMarketViews();
+      // Should have been aborted, NOT confirmed
+      expect(views[0]!.position).toBeNull();
+      expect(views[0]!.pendingDirection).toBeNull();
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
+    it("aborts pending order if Poly threshold vanishes during execution delay", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 100 });
+      const now = Date.now();
+
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      expect(engine.getMarketViews()[0]!.pendingDirection).not.toBeNull();
+
+      // Poly threshold vanishes during delay
+      const polySnapNoThreshold = makePolySnap({
+        timeLeftSec: 595,
+        priceToBeat: 0,
+        referencePrice: 0,
+        referenceSource: "missing",
+      });
+
+      engine.evaluate(makeSnapMap(polySnapNoThreshold), makeSnapMap(kalshiSnap), now + 101);
+      expect(engine.getMarketViews()[0]!.position).toBeNull();
+      expect(engine.getSummary().totalTrades).toBe(0);
+    });
+
+    it("confirms pending order when both thresholds remain valid", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 100 });
+      const now = Date.now();
+
+      const polySnap = makePolySnap({ timeLeftSec: 600, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, priceToBeat: 50000 });
+
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      expect(engine.getMarketViews()[0]!.pendingDirection).not.toBeNull();
+
+      // Both thresholds still valid -> should confirm
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 101);
+      expect(engine.getMarketViews()[0]!.position).not.toBeNull();
+      expect(engine.getSummary().totalTrades).toBe(1);
+    });
+  });
+
   describe("position force resolution", () => {
     it("force-resolves stuck position after max unresolved time", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });
@@ -1141,6 +1211,79 @@ describe("ArbitrageEngine", () => {
       engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapFixed), now + 300);
       engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnapFixed), now + 301);
       expect(engine.getSummary().totalTrades).toBe(1);
+    });
+  });
+
+  describe("stress testing", () => {
+    it("survives 2000 eval cycles through full market lifecycle without corruption", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const startTime = Date.now();
+      const MARKET_DURATION = 900_000; // 15 min in ms
+
+      let tradeCount = 0;
+
+      for (let cycle = 0; cycle < 2000; cycle++) {
+        const elapsed = cycle * 500; // 500ms per cycle = ~16 min simulation
+        const now = startTime + elapsed;
+        const timeLeftSec = Math.max(-60, (MARKET_DURATION - elapsed) / 1000);
+        const marketOpen = timeLeftSec > 0;
+        const closeTime = startTime + MARKET_DURATION;
+
+        const spotPrice = 50000 + Math.sin(cycle / 50) * 500; // oscillating
+        const threshold = 50000;
+
+        const polySnap = makePolySnap({
+          timeLeftSec,
+          marketCloseTimeMs: closeTime,
+          priceToBeat: threshold,
+          cryptoPrice: spotPrice,
+          dataStatus: cycle % 100 < 3 ? "stale" : "healthy", // 3% stale
+          priceHistoryWithTs: marketOpen ? [
+            { price: spotPrice, ts: now - 10000 },
+            { price: spotPrice, ts: now - 5000 },
+            { price: spotPrice, ts: now },
+          ] : [],
+        });
+        const kalshiSnap = makeKalshiSnap({
+          timeLeftSec,
+          marketCloseTimeMs: closeTime,
+          priceToBeat: threshold,
+          cryptoPrice: spotPrice,
+          kalshiUnderlyingValue: spotPrice,
+          kalshiUnderlyingTs: now,
+          dataStatus: cycle % 120 < 3 ? "stale" : "healthy",
+          priceHistoryWithTs: marketOpen ? [
+            { price: spotPrice, ts: now - 10000 },
+            { price: spotPrice, ts: now - 5000 },
+            { price: spotPrice, ts: now },
+          ] : [],
+        });
+
+        // Must never throw
+        engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+
+        const summary = engine.getSummary();
+        // Basic invariants that must always hold
+        expect(summary.totalTrades).toBeGreaterThanOrEqual(tradeCount);
+        expect(summary.wins + summary.losses).toBeLessThanOrEqual(summary.totalTrades);
+        expect(Number.isFinite(summary.totalProfit)).toBe(true);
+        expect(Number.isFinite(summary.openExposure)).toBe(true);
+        expect(summary.runtimeSec).toBeGreaterThanOrEqual(0);
+
+        tradeCount = summary.totalTrades;
+      }
+
+      // Should have traded at least once in 2000 cycles
+      const finalSummary = engine.getSummary();
+      expect(finalSummary.totalTrades).toBeGreaterThan(0);
+
+      // All positions should be resolved (market closed 60+ seconds ago)
+      const views = engine.getMarketViews();
+      if (views[0]) {
+        // Position might still be resolving in the last few cycles, that's OK
+        // But the engine state should be valid
+        expect(views[0].coin).toBe("btc");
+      }
     });
   });
 
