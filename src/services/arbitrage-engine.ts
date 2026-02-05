@@ -199,6 +199,8 @@ interface CoinState {
     downYesSource: EstimateSource | null;
     selected: ArbitrageDirection | null;
   };
+  lastSkipReason: string | null;
+  lastSkipLogMs: number;
 }
 
 export interface ArbitrageEngineOptions {
@@ -376,6 +378,8 @@ export class ArbitrageEngine {
         downYesSource: null,
         selected: null,
       },
+      lastSkipReason: null,
+      lastSkipLogMs: 0,
     };
   }
 
@@ -426,7 +430,7 @@ export class ArbitrageEngine {
     }
 
     if (!polySnap || !kalshiSnap) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, "missing_snapshot", nowMs);
       return;
     }
 
@@ -465,25 +469,25 @@ export class ArbitrageEngine {
     }
 
     if (timeLeft === null) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, "time_unknown", nowMs);
       return;
     }
     if (timeLeft > config.tradeAllowedTimeLeft) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, `waiting (${Math.round(timeLeft)}s left, allowed<=${config.tradeAllowedTimeLeft}s)`, nowMs);
       return;
     }
     if (config.tradeStopTimeLeft !== null && timeLeft <= config.tradeStopTimeLeft) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, `stopped (${Math.round(timeLeft)}s left, stop<=${config.tradeStopTimeLeft}s)`, nowMs);
       return;
     }
 
     if (!isFreshEnough(config, polySnap, kalshiSnap, nowMs)) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, `stale_data (poly=${polySnap.dataStatus} kalshi=${kalshiSnap.dataStatus})`, nowMs);
       return;
     }
 
     if (!fillBudget) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, "no_fill_budget", nowMs);
       return;
     }
 
@@ -491,11 +495,11 @@ export class ArbitrageEngine {
     const polyThreshold = resolveThreshold(polySnap);
     const kalshiThreshold = resolveThreshold(kalshiSnap);
     if (!polyThreshold.value || polyThreshold.value <= 0) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, `poly_threshold_missing (src=${polyThreshold.source})`, nowMs);
       return;
     }
     if (!kalshiThreshold.value || kalshiThreshold.value <= 0) {
-      this.states.set(coin, state);
+      this.skipCoin(state, coin, `kalshi_threshold_missing (src=${kalshiThreshold.source})`, nowMs);
       return;
     }
 
@@ -553,6 +557,33 @@ export class ArbitrageEngine {
           2,
         )} delay=${delayMs}ms polyThreshold=${polyThreshold.value} kalshiThreshold=${kalshiThreshold.value}`,
       );
+    }
+    this.states.set(coin, state);
+  }
+
+  /**
+   * Log why a coin was skipped. Only logs when the reason changes or
+   * every 30s to avoid spamming. This is invaluable for diagnosing
+   * "why isn't it trading?" issues.
+   */
+  private skipCoin(
+    state: CoinState,
+    coin: CoinSymbol,
+    reason: string,
+    nowMs: number,
+  ): void {
+    const SKIP_LOG_INTERVAL_MS = 30_000;
+    const reasonChanged = state.lastSkipReason !== reason;
+    const logDue = nowMs - state.lastSkipLogMs >= SKIP_LOG_INTERVAL_MS;
+
+    if (reasonChanged || logDue) {
+      if (!this.summaryOnly) {
+        this.logger.log(
+          `${coin.toUpperCase()} SKIP: ${reason}`,
+        );
+      }
+      state.lastSkipReason = reason;
+      state.lastSkipLogMs = nowMs;
     }
     this.states.set(coin, state);
   }
