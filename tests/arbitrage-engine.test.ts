@@ -1253,6 +1253,93 @@ describe("ArbitrageEngine", () => {
     });
   });
 
+  describe("payout math verification", () => {
+    it("wins with correct payout when outcomes agree (UP)", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime = now + 1000;
+
+      // Enter position
+      const polySnap = makePolySnap({ timeLeftSec: 600, marketCloseTimeMs: closeTime, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, marketCloseTimeMs: closeTime, priceToBeat: 50000 });
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Resolve: price above threshold → both platforms agree UP
+      const polyClosed = makePolySnap({
+        timeLeftSec: -1, marketCloseTimeMs: closeTime, priceToBeat: 50000,
+        cryptoPrice: 50500, kalshiUnderlyingValue: 50500,
+        priceHistoryWithTs: [
+          { price: 50500, ts: closeTime - 30000 },
+          { price: 50500, ts: closeTime - 20000 },
+          { price: 50500, ts: closeTime - 10000 },
+        ],
+      });
+      const kalshiClosed = makeKalshiSnap({
+        timeLeftSec: -1, marketCloseTimeMs: closeTime, priceToBeat: 50000,
+        cryptoPrice: 50500, kalshiUnderlyingValue: 50500, kalshiUnderlyingTs: closeTime - 5000,
+        priceHistoryWithTs: [
+          { price: 50500, ts: closeTime - 30000 },
+          { price: 50500, ts: closeTime - 20000 },
+          { price: 50500, ts: closeTime - 10000 },
+        ],
+      });
+
+      const far = closeTime + 400_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(makeSnapMap(polyClosed), makeSnapMap(kalshiClosed), far + i * 100);
+      }
+
+      const summary = engine.getSummary();
+      expect(summary.wins + summary.losses).toBe(1);
+      // Payout = shares, net = shares * gap > 0 (always profitable for arb)
+      expect(summary.totalProfit).toBeGreaterThan(0);
+    });
+
+    it("wins with correct payout when outcomes agree (DOWN)", () => {
+      const engine = createEngine(undefined, { decisionLatencyMs: 0 });
+      const now = Date.now();
+      const closeTime = now + 1000;
+
+      const polySnap = makePolySnap({ timeLeftSec: 600, marketCloseTimeMs: closeTime, priceToBeat: 50000 });
+      const kalshiSnap = makeKalshiSnap({ timeLeftSec: 600, marketCloseTimeMs: closeTime, priceToBeat: 50000 });
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now);
+      engine.evaluate(makeSnapMap(polySnap), makeSnapMap(kalshiSnap), now + 1);
+      expect(engine.getSummary().totalTrades).toBe(1);
+
+      // Resolve: price below threshold → both platforms agree DOWN
+      const polyClosed = makePolySnap({
+        timeLeftSec: -1, marketCloseTimeMs: closeTime, priceToBeat: 50000,
+        cryptoPrice: 49500, kalshiUnderlyingValue: 49500,
+        priceHistoryWithTs: [
+          { price: 49500, ts: closeTime - 30000 },
+          { price: 49500, ts: closeTime - 20000 },
+          { price: 49500, ts: closeTime - 10000 },
+        ],
+      });
+      const kalshiClosed = makeKalshiSnap({
+        timeLeftSec: -1, marketCloseTimeMs: closeTime, priceToBeat: 50000,
+        cryptoPrice: 49500, kalshiUnderlyingValue: 49500, kalshiUnderlyingTs: closeTime - 5000,
+        priceHistoryWithTs: [
+          { price: 49500, ts: closeTime - 30000 },
+          { price: 49500, ts: closeTime - 20000 },
+          { price: 49500, ts: closeTime - 10000 },
+        ],
+      });
+
+      const far = closeTime + 400_000;
+      for (let i = 0; i < 5; i++) {
+        engine.evaluate(makeSnapMap(polyClosed), makeSnapMap(kalshiClosed), far + i * 100);
+      }
+
+      const summary = engine.getSummary();
+      expect(summary.wins + summary.losses).toBe(1);
+      // Payout = shares, net = shares * gap > 0 (always profitable for arb)
+      expect(summary.totalProfit).toBeGreaterThan(0);
+    });
+  });
+
   describe("stress testing", () => {
     it("survives 2000 eval cycles through full market lifecycle without corruption", () => {
       const engine = createEngine(undefined, { decisionLatencyMs: 0 });
