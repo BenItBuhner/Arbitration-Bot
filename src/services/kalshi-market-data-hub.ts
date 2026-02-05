@@ -37,9 +37,9 @@ function parseEnvNumber(
   return Math.max(minValue, parsed);
 }
 
-const BOOK_STALE_MS = parseEnvNumber("KALSHI_BOOK_STALE_MS", 10000, 1000);
-const PRICE_STALE_MS = parseEnvNumber("KALSHI_PRICE_STALE_MS", 12000, 1000);
-const DATA_STARTUP_GRACE_MS = parseEnvNumber("KALSHI_DATA_STARTUP_GRACE_MS", 12000, 3000);
+const BOOK_STALE_MS = parseEnvNumber("KALSHI_BOOK_STALE_MS", 45000, 1000);
+const PRICE_STALE_MS = parseEnvNumber("KALSHI_PRICE_STALE_MS", 45000, 1000);
+const DATA_STARTUP_GRACE_MS = parseEnvNumber("KALSHI_DATA_STARTUP_GRACE_MS", 20000, 3000);
 const MARKET_RESELECT_MS = parseEnvNumber("KALSHI_MARKET_RESELECT_MS", 60000, 10000);
 const MARKET_RESELECT_COOLDOWN_MS = parseEnvNumber("KALSHI_MARKET_RESELECT_COOLDOWN_MS", 60000, 10000);
 const SIGNAL_DEPTH_LEVELS = 3;
@@ -440,7 +440,7 @@ export class KalshiMarketDataHub {
 
     this.evaluationTimer = setInterval(() => {
       this.tick();
-    }, 500);
+    }, 100);
   }
 
   stop(): void {
@@ -1003,6 +1003,9 @@ export class KalshiMarketDataHub {
     const state = this.states.get(coin);
     if (!state) return;
 
+    // Trades prove the market is active -- count as book freshness
+    state.lastBookUpdateMs = Date.now();
+
     const timestamp = trade.timestampMs ?? Date.now();
     const size = trade.count ?? 0;
 
@@ -1025,7 +1028,9 @@ export class KalshiMarketDataHub {
       });
     }
 
-    this.trimRecentTrades(state, Date.now());
+    const now = Date.now();
+    this.trimRecentTrades(state, now);
+    this.updateDataStatus(state, now);
   }
 
   private handleTicker(update: KalshiTickerUpdate): void {
@@ -1033,6 +1038,9 @@ export class KalshiMarketDataHub {
     if (!coin) return;
     const state = this.states.get(coin);
     if (!state) return;
+
+    // Ticker events carry yesBid/yesAsk -- proves the book is current
+    state.lastBookUpdateMs = Date.now();
 
     if (update.price !== null) {
       const ts = update.timestampMs ?? Date.now();
@@ -1054,6 +1062,7 @@ export class KalshiMarketDataHub {
     if (update.yesAsk !== null) {
       state.bestAsk.set("YES", update.yesAsk);
     }
+    this.updateDataStatus(state, Date.now());
   }
 
   private maybeRefreshKalshiReference(state: KalshiMarketState, now: number): void {
@@ -1281,6 +1290,35 @@ export class KalshiMarketDataHub {
     if (nextStatus !== state.dataStatus) {
       state.dataStatus = nextStatus;
       state.lastDataStatusMs = now;
+
+      if (nextStatus === "healthy") {
+        this.logger.log(
+          `DATA: Kalshi ${state.coin.toUpperCase()} data active (book)`,
+        );
+      } else if (nextStatus === "stale") {
+        const reasons: string[] = [];
+        if (!bookFresh) {
+          if (state.lastBookUpdateMs > 0) {
+            const bookAge = Math.round((now - state.lastBookUpdateMs) / 1000);
+            reasons.push(`book stale ${bookAge}s ago`);
+          } else {
+            reasons.push("book missing");
+          }
+        }
+        if (this.requireCryptoPrice && !priceFresh) {
+          if (state.lastCryptoUpdateMs > 0) {
+            const priceAge = Math.round((now - state.lastCryptoUpdateMs) / 1000);
+            reasons.push(`price stale ${priceAge}s ago`);
+          } else {
+            reasons.push("price missing");
+          }
+        }
+        const since = Math.round((now - state.selectedAtMs) / 1000);
+        this.logger.log(
+          `DATA: Kalshi ${state.coin.toUpperCase()} data stale (${reasons.join(", ")}) (${since}s since selection)`,
+          "WARN",
+        );
+      }
     }
   }
 

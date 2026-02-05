@@ -581,6 +581,26 @@ export async function fakeTradeRouteWithOptions(
       )
     : () => {};
 
+  // ── Fast evaluation loop (1ms) ───────────────────────────────────
+  // The arb engine must react to opportunities sub-millisecond.
+  // setInterval floors to 1ms in Node; this is the fastest poll possible.
+  const evalTimer = setInterval(() => {
+    try {
+      const polySnapshots = polyHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub.getSnapshots();
+      const now = Date.now();
+      for (const engine of profileEngines) {
+        engine.evaluate(polySnapshots, kalshiSnapshots, now);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown error in eval loop.";
+      systemLogger.log(`Arbitrage eval error: ${message}`, "ERROR");
+    }
+  }, 1);
+
+  // ── Render loop (250ms) ────────────────────────────────────────
+  // Dashboard rendering and odds history are visual-only; 4 fps for snappy UI.
   const renderTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
@@ -625,9 +645,6 @@ export async function fakeTradeRouteWithOptions(
             }
           }
         }
-      }
-      for (const engine of profileEngines) {
-        engine.evaluate(polySnapshots, kalshiSnapshots, Date.now());
       }
 
       if (!dashboard) {
@@ -684,6 +701,7 @@ export async function fakeTradeRouteWithOptions(
   }, 250);
 
   process.on("SIGINT", () => {
+    clearInterval(evalTimer);
     clearInterval(renderTimer);
     cleanupNavigation();
     polyHub.stop();

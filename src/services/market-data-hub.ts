@@ -20,13 +20,13 @@ import { computeSignals } from "./market-signals";
 import type { MarketProvider } from "../providers/provider";
 
 const MARKET_DURATION_MS = 15 * 60 * 1000;
-const BOOK_STALE_MS = parseEnvNumber("PM_BOOK_STALE_MS", 10000, 1000);
-const BOOK_RESET_MS = parseEnvNumber("PM_BOOK_RESET_MS", 25000, 5000);
-const WS_RESET_COOLDOWN_MS = parseEnvNumber("PM_WS_RESET_COOLDOWN_MS", 15000, 3000);
-const PRICE_STALE_MS = parseEnvNumber("PM_PRICE_STALE_MS", 12000, 1000);
-const PRICE_RESET_MS = parseEnvNumber("PM_PRICE_RESET_MS", 25000, 5000);
-const CRYPTO_RESET_COOLDOWN_MS = parseEnvNumber("PM_CRYPTO_RESET_COOLDOWN_MS", 15000, 3000);
-const DATA_STARTUP_GRACE_MS = parseEnvNumber("PM_DATA_STARTUP_GRACE_MS", 12000, 3000);
+const BOOK_STALE_MS = parseEnvNumber("PM_BOOK_STALE_MS", 45000, 1000);
+const BOOK_RESET_MS = parseEnvNumber("PM_BOOK_RESET_MS", 90000, 5000);
+const WS_RESET_COOLDOWN_MS = parseEnvNumber("PM_WS_RESET_COOLDOWN_MS", 45000, 3000);
+const PRICE_STALE_MS = parseEnvNumber("PM_PRICE_STALE_MS", 45000, 1000);
+const PRICE_RESET_MS = parseEnvNumber("PM_PRICE_RESET_MS", 90000, 5000);
+const CRYPTO_RESET_COOLDOWN_MS = parseEnvNumber("PM_CRYPTO_RESET_COOLDOWN_MS", 45000, 3000);
+const DATA_STARTUP_GRACE_MS = parseEnvNumber("PM_DATA_STARTUP_GRACE_MS", 20000, 3000);
 const MARKET_RESELECT_MS = parseEnvNumber("PM_MARKET_RESELECT_MS", 60000, 10000);
 const MARKET_RESELECT_COOLDOWN_MS = parseEnvNumber("PM_MARKET_RESELECT_COOLDOWN_MS", 60000, 10000);
 const PENDING_RETRY_BASE_MS = 5000;
@@ -234,7 +234,7 @@ export class MarketDataHub {
 
     this.evaluationTimer = setInterval(() => {
       this.tick();
-    }, 500);
+    }, 100);
   }
 
   stop(): void {
@@ -505,7 +505,10 @@ export class MarketDataHub {
       if (!coin) continue;
       const state = this.states.get(coin);
       if (!state) continue;
-      state.lastPriceUpdateMs = Date.now();
+      const now = Date.now();
+      state.lastPriceUpdateMs = now;
+      // price_change carries best_bid/best_ask -- proves the book is current
+      state.lastBookUpdateMs = now;
       const bestBid = parseFloat(change.best_bid);
       const bestAsk = parseFloat(change.best_ask);
       if (!Number.isNaN(bestBid)) {
@@ -514,6 +517,7 @@ export class MarketDataHub {
       if (!Number.isNaN(bestAsk)) {
         state.bestAsk.set(change.asset_id, bestAsk);
       }
+      this.updateDataStatus(state, now);
     }
   }
 
@@ -566,7 +570,11 @@ export class MarketDataHub {
     if (!Number.isFinite(price) || !Number.isFinite(size)) return;
 
     const parsedTs = Date.parse(event.timestamp);
-    const timestamp = Number.isFinite(parsedTs) ? parsedTs : Date.now();
+    const now = Date.now();
+    const timestamp = Number.isFinite(parsedTs) ? parsedTs : now;
+
+    // Trades prove the market is actively trading -- count as book freshness
+    state.lastBookUpdateMs = now;
 
     state.recentTrades.push({
       timestamp,
@@ -576,7 +584,8 @@ export class MarketDataHub {
       tokenId: event.asset_id,
     });
 
-    this.trimRecentTrades(state, Date.now());
+    this.trimRecentTrades(state, now);
+    this.updateDataStatus(state, now);
   }
 
   private tick(): void {
@@ -650,20 +659,26 @@ export class MarketDataHub {
       } else if (nextStatus === "stale") {
         const reasons: string[] = [];
         if (!bookFresh) {
-          reasons.push(
-            state.lastBookUpdateMs > 0 ? "book stale" : "book missing",
-          );
+          if (state.lastBookUpdateMs > 0) {
+            const bookAge = Math.round((now - state.lastBookUpdateMs) / 1000);
+            reasons.push(`book stale ${bookAge}s ago`);
+          } else {
+            reasons.push("book missing");
+          }
         }
         if (this.requireCryptoPrice && !priceFresh) {
-          reasons.push(
-            state.lastCryptoUpdateMs > 0 ? "price stale" : "price missing",
-          );
+          if (state.lastCryptoUpdateMs > 0) {
+            const priceAge = Math.round((now - state.lastCryptoUpdateMs) / 1000);
+            reasons.push(`price stale ${priceAge}s ago`);
+          } else {
+            reasons.push("price missing");
+          }
         }
         const since = Math.round((now - state.selectedAtMs) / 1000);
         this.logger.log(
           `DATA: ${state.coin.toUpperCase()} data stale (${reasons.join(
             ", ",
-          )}) (${since}s)`,
+          )}) (${since}s since selection)`,
           "WARN",
         );
       }
@@ -875,9 +890,15 @@ export class MarketDataHub {
       staleMs >= BOOK_RESET_MS || selectedMs >= BOOK_RESET_MS;
     if (!shouldReset) return;
 
+    // If the WS is still connected, the market is just quiet -- skip the
+    // destructive full reconnect that would kill subscriptions for ALL coins.
+    if (this.marketWs?.isConnected()) {
+      return;
+    }
+
     this.lastWsResetMs = now;
     this.logger.log(
-      `DATA: ${state.coin.toUpperCase()} resetting market WS (stale data)`,
+      `DATA: ${state.coin.toUpperCase()} resetting market WS (connection dead)`,
       "WARN",
     );
     this.connectMarketWs();
@@ -892,9 +913,14 @@ export class MarketDataHub {
       staleMs >= PRICE_RESET_MS || selectedMs >= PRICE_RESET_MS;
     if (!shouldReset) return;
 
+    // If the crypto WS is still connected, skip the full reconnect.
+    if (this.cryptoWs?.isConnected()) {
+      return;
+    }
+
     this.lastCryptoWsResetMs = now;
     this.logger.log(
-      `DATA: ${state.coin.toUpperCase()} resetting crypto WS (stale price)`,
+      `DATA: ${state.coin.toUpperCase()} resetting crypto WS (connection dead)`,
       "WARN",
     );
     this.connectCryptoWs();

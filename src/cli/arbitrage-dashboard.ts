@@ -176,8 +176,12 @@ export class ArbitrageDashboard {
     }
 
     output += `${colors.dim}${"-".repeat(80)}${colors.reset}\n`;
-    output += `${colors.bright}Recent Logs${colors.reset}\n`;
-    const recentLogs = activeProfile.logs.slice(-this.RECENT_LOG_LIMIT);
+    const coinLabel = activeCoin ? activeCoin.toUpperCase() : null;
+    output += `${colors.bright}Recent Logs${coinLabel ? ` (${coinLabel})` : ""}${colors.reset}\n`;
+    const filteredLogs = coinLabel
+      ? activeProfile.logs.filter((line) => line.includes(`] ${coinLabel} `))
+      : activeProfile.logs;
+    const recentLogs = filteredLogs.slice(-this.RECENT_LOG_LIMIT);
     for (const line of recentLogs) {
       output += `${line}\n`;
     }
