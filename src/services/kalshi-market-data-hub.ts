@@ -255,7 +255,8 @@ function resolveSeriesTicker(market: Record<string, unknown>): string | null {
   return null;
 }
 
-function parseStrikePrice(market: Record<string, unknown>): number {
+/** Exported for testing. */
+export function parseStrikePrice(market: Record<string, unknown>): number {
   const strikeBlock =
     market.strike && typeof market.strike === "object" ? market.strike : null;
   const strikeTypeRaw = String(
@@ -301,6 +302,8 @@ function parseStrikePrice(market: Record<string, unknown>): number {
     return floorStrike;
   }
 
+  // Deep search -- deliberately EXCLUDES cents-denominated keys since
+  // those need special scale handling in the candidates array below.
   const strikeKeys = new Set([
     "floor_strike",
     "cap_strike",
@@ -309,7 +312,6 @@ function parseStrikePrice(market: Record<string, unknown>): number {
     "strike_price",
     "strike_price_decimal",
     "strike_price_dollars",
-    "strike_price_cents",
     "strike",
     "price_to_beat",
     "priceToBeat",
