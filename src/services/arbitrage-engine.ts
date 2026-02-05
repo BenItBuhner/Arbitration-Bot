@@ -576,9 +576,12 @@ export class ArbitrageEngine {
     reason: string,
     nowMs: number,
   ): void {
-    const SKIP_LOG_INTERVAL_MS = 30_000;
+    // Log less frequently for expected skip states (waiting/stopped),
+    // more frequently for actionable ones (stale_data, threshold_missing)
+    const isExpected = reason.startsWith("waiting") || reason.startsWith("market_closed");
+    const intervalMs = isExpected ? 120_000 : 30_000;
     const reasonChanged = state.lastSkipReason !== reason;
-    const logDue = nowMs - state.lastSkipLogMs >= SKIP_LOG_INTERVAL_MS;
+    const logDue = nowMs - state.lastSkipLogMs >= intervalMs;
 
     if (reasonChanged || logDue) {
       if (!this.summaryOnly) {
