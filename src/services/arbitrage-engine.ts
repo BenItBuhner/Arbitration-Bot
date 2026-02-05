@@ -624,19 +624,34 @@ export class ArbitrageEngine {
     // Execution delay model: We are already committed. No abort possible.
     // Re-fetch post-delay books to determine actual fill.
     const fillBudget = resolveFillBudget(config);
-    const postDelayCandidate = fillBudget
-      ? buildCandidateNoValidation(
-          pending.direction,
-          polySnap,
-          kalshiSnap,
-          fillBudget,
-        )
-      : null;
+    let postDelayCandidate: ReturnType<typeof buildCandidateNoValidation> = null;
+    try {
+      postDelayCandidate = fillBudget
+        ? buildCandidateNoValidation(
+            pending.direction,
+            polySnap,
+            kalshiSnap,
+            fillBudget,
+          )
+        : null;
+    } catch {
+      // Post-delay book walk failed -- use original candidate
+    }
 
     // Use post-delay fill if available, otherwise fallback to original candidate
     const actualFill = postDelayCandidate?.estimate ?? pending.candidate;
     const actualGap = actualFill.gap;
     const slippage = actualGap - pending.originalGap;
+
+    // Safety: if the post-delay fill has a deeply negative gap, the
+    // opportunity evaporated. In paper mode we log this as slippage data.
+    // We still execute (committed), but log the warning.
+    if (actualGap < -0.10) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} SLIPPAGE_WARNING: post-delay gap=${actualGap.toFixed(4)} (was ${pending.originalGap.toFixed(4)}) -- opportunity evaporated`,
+        "WARN",
+      );
+    }
 
     state.position = {
       marketKey: pending.marketKey,
