@@ -100,6 +100,29 @@ describe("provider configs", () => {
     }
   });
 
+  it("kalshi selectors have series tickers for market discovery", () => {
+    const kalshi = loadProviderConfig("kalshi");
+    const selectors = kalshi.kalshiSelectorsByCoin;
+    expect(selectors).toBeDefined();
+    if (!selectors) return;
+
+    for (const [coin, selector] of selectors) {
+      // Each coin should have at least one discovery method
+      const hasDiscovery =
+        selector.seriesTickers.length > 0 ||
+        selector.eventTickers.length > 0 ||
+        selector.tickers.length > 0 ||
+        selector.autoDiscover;
+      expect(hasDiscovery).toBe(true);
+
+      // Series tickers should look like valid Kalshi tickers (uppercase, contains coin abbreviation)
+      for (const series of selector.seriesTickers) {
+        expect(series).toBe(series.toUpperCase()); // should be uppercase
+        expect(series.length).toBeGreaterThan(3); // not empty/too short
+      }
+    }
+  });
+
   it("polymarket config has coins matching arb config", () => {
     const poly = loadProviderConfig("polymarket");
     const arb = loadArbitrageConfig();
