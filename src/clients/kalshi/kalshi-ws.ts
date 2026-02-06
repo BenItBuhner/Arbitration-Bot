@@ -314,9 +314,8 @@ export class KalshiMarketWS {
           return;
         }
         try {
-          // Kalshi WS doesn't have explicit ping, but sending an empty subscribe
-          // or a no-op command can keep the connection alive
-          this.ws.send(JSON.stringify({ id: Date.now(), cmd: "ping" }));
+          // Send protocol-level ping frame to keep connection alive
+          this.ws.ping();
         } catch {
           // Ignore ping errors
         }

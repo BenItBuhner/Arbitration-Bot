@@ -1,10 +1,10 @@
-type CLIMode =
+export type CLIMode =
   | "fake-trade"
   | "watch-market"
   | "cross-platform-analysis"
   | "price-diff-detection"
   | "backtest";
-type Provider = "polymarket" | "kalshi";
+export type Provider = "polymarket" | "kalshi";
 
 export interface CLIArgs {
   mode?: CLIMode;

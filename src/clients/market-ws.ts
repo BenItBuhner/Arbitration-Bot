@@ -271,9 +271,9 @@ export class MarketWS {
 
       try {
         this.ws.send(JSON.stringify(message));
-      if (!this.config.silent) {
-        console.log(`Unsubscribed from ${tokenIds.length} token(s)`);
-      }
+        if (!this.config.silent) {
+          console.log(`Unsubscribed from ${tokenIds.length} token(s)`);
+        }
       } catch (error) {
         if (!this.config.silent) {
           console.error("Failed to send unsubscription:", error);

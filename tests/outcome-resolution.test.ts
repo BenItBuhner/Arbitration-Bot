@@ -83,7 +83,6 @@ describe("resolveThreshold", () => {
     // negative priceToBeat is not > 0, so falls back
     expect(result.value).toBe(50000);
   });
-});
 
   it("extracts large price from label with commas", () => {
     const snap = createSnap({
@@ -108,6 +107,7 @@ describe("resolveThreshold", () => {
     expect(result.value).toBeCloseTo(150.25, 1);
     expect(result.source).toBe("label");
   });
+});
 
 // ── resolveCloseTimeMs ───────────────────────────────────────────
 
