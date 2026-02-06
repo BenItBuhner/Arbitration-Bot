@@ -645,13 +645,13 @@ export async function fakeTradeRouteWithOptions(
       )
     : () => {};
 
-  // ── Evaluation loop ─────────────────────────────────────────────
-  // Default 10ms is fast enough to catch arb opportunities (market data
-  // arrives at ~50-100ms granularity via WS) while being much more
-  // CPU-friendly than the previous 1ms interval.
+  // ── Fast evaluation loop ─────────────────────────────────────────
+  // The arb engine must react to opportunities sub-millisecond.
+  // setInterval floors to 1ms in Node; this is the fastest poll possible.
+  // Override via ARB_EVAL_INTERVAL_MS if needed (e.g. for low-power machines).
   const ARB_EVAL_INTERVAL_MS = Math.max(
     1,
-    Number(process.env.ARB_EVAL_INTERVAL_MS) || 10,
+    Number(process.env.ARB_EVAL_INTERVAL_MS) || 1,
   );
   const evalTimer = setInterval(() => {
     try {

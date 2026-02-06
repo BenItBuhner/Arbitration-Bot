@@ -355,13 +355,9 @@ export class ArbitrageEngine {
     }
 
     this.summary.openExposure = openExposure;
-    // Only push to pnlHistory when profit actually changes (avoids 1000+/s array ops)
-    const lastPnl = this.pnlHistory[this.pnlHistory.length - 1];
-    if (lastPnl === undefined || lastPnl !== this.summary.totalProfit) {
-      this.pnlHistory.push(this.summary.totalProfit);
-      if (this.pnlHistory.length > 180) {
-        this.pnlHistory.shift();
-      }
+    this.pnlHistory.push(this.summary.totalProfit);
+    if (this.pnlHistory.length > 180) {
+      this.pnlHistory.shift();
     }
   }
 
