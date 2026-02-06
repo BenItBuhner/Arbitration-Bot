@@ -948,6 +948,7 @@ export class MarketDataHub {
     if (!next) return;
 
     const current = this.states.get(coin);
+    const oldTokenIds = current ? [...current.tokenIds] : [];
     if (current) {
       current.tokenIds.forEach((tokenId) => this.tokenToCoin.delete(tokenId));
     }
@@ -955,7 +956,17 @@ export class MarketDataHub {
     this.states.set(coin, next);
     this.registerTokenIds(next);
     this.logger.log(`DATA: ${coin.toUpperCase()} rotating market (sub refresh)`);
-    this.refreshMarketWsSubscriptions();
+
+    // Subscribe new tokens directly instead of full replace (avoids thrashing
+    // when multiple coins rotate simultaneously at market boundaries).
+    if (this.marketWs && this.marketWs.isConnected()) {
+      if (oldTokenIds.length > 0) {
+        this.marketWs.unsubscribe(oldTokenIds);
+      }
+      this.marketWs.subscribe(next.tokenIds);
+    } else {
+      this.connectMarketWs();
+    }
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     }
@@ -972,6 +983,7 @@ export class MarketDataHub {
     }
 
     const current = this.states.get(coin);
+    const oldTokenIds = current ? [...current.tokenIds] : [];
     if (current) {
       current.tokenIds.forEach((tokenId) => this.tokenToCoin.delete(tokenId));
     }
@@ -981,7 +993,16 @@ export class MarketDataHub {
     this.logger.log(
       `DATA: ${coin.toUpperCase()} market reselected (${next.slug})`,
     );
-    this.refreshMarketWsSubscriptions();
+
+    // Subscribe new tokens directly (same approach as rotateMarket)
+    if (this.marketWs && this.marketWs.isConnected()) {
+      if (oldTokenIds.length > 0) {
+        this.marketWs.unsubscribe(oldTokenIds);
+      }
+      this.marketWs.subscribe(next.tokenIds);
+    } else {
+      this.connectMarketWs();
+    }
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     } else {
