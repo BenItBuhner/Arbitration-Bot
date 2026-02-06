@@ -488,27 +488,34 @@ export async function fakeTradeRouteWithOptions(
   }
 
   const polyHub = new MarketDataHub(systemLogger, { requireCryptoPrice: false });
-  const kalshiHub = new KalshiMarketDataHub(
-    systemLogger,
-    kalshiConfig,
-    kalshiSelectorsByCoin,
-    { requireCryptoPrice: false },
-  );
+  let kalshiHub: KalshiMarketDataHub | null = null;
+  try {
+    kalshiHub = new KalshiMarketDataHub(
+      systemLogger,
+      kalshiConfig,
+      kalshiSelectorsByCoin,
+      { requireCryptoPrice: false },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Kalshi hub creation failed: ${msg}`, "ERROR");
+    systemLogger.log("STARTUP: Running in Polymarket-only mode (Kalshi data unavailable)", "WARN");
+  }
 
   try {
     await polyHub.start(resolvedCoins);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
     systemLogger.log(`STARTUP: Polymarket hub start failed: ${msg}`, "ERROR");
-    // Continue -- partial data is better than no data
   }
 
-  try {
-    await kalshiHub.start(resolvedCoins);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown";
-    systemLogger.log(`STARTUP: Kalshi hub start failed: ${msg}`, "ERROR");
-    // Continue -- partial data is better than no data
+  if (kalshiHub) {
+    try {
+      await kalshiHub.start(resolvedCoins);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      systemLogger.log(`STARTUP: Kalshi hub start failed: ${msg}`, "ERROR");
+    }
   }
 
   // ── Startup health check ──────────────────────────────────────
@@ -528,7 +535,7 @@ export async function fakeTradeRouteWithOptions(
   }
   // Log initial market selections
   const polyInitialSnaps = polyHub.getSnapshots();
-  const kalshiInitialSnaps = kalshiHub.getSnapshots();
+  const kalshiInitialSnaps = kalshiHub?.getSnapshots() ?? new Map();
   for (const coin of resolvedCoins) {
     const polySnap = polyInitialSnaps.get(coin);
     const kalshiSnap = kalshiInitialSnaps.get(coin);
@@ -537,7 +544,20 @@ export async function fakeTradeRouteWithOptions(
     );
   }
 
-  const kalshiOutcomeClient = new KalshiClient(kalshiConfig);
+  let kalshiOutcomeClient: KalshiClient;
+  try {
+    kalshiOutcomeClient = new KalshiClient(kalshiConfig);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Kalshi outcome client failed: ${msg}`, "ERROR");
+    // Create a stub that returns null for everything
+    kalshiOutcomeClient = {
+      getMarket: async () => null,
+      getMarkets: async () => ({ markets: [], cursor: undefined }),
+      searchMarkets: async () => [],
+      getEvent: async () => null,
+    } as any;
+  }
   const profileEngines: ArbitrageEngine[] = [];
   const profileCoinsByName = new Map<string, CoinSymbol[]>();
   const activeCoinIndexByProfile = new Map<string, number>();
@@ -590,7 +610,7 @@ export async function fakeTradeRouteWithOptions(
   if (profileEngines.length === 0) {
     systemLogger.log("No profiles eligible for selected coins.", "WARN");
     polyHub.stop();
-    kalshiHub.stop();
+    kalshiHub?.stop();
     return;
   }
 
@@ -656,7 +676,7 @@ export async function fakeTradeRouteWithOptions(
   const evalTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
-      const kalshiSnapshots = kalshiHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub?.getSnapshots() ?? new Map();
       const now = Date.now();
       for (const engine of profileEngines) {
         engine.evaluate(polySnapshots, kalshiSnapshots, now);
@@ -673,7 +693,7 @@ export async function fakeTradeRouteWithOptions(
   const renderTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
-      const kalshiSnapshots = kalshiHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub?.getSnapshots() ?? new Map();
       for (const coin of resolvedCoins) {
         const polySnap = polySnapshots.get(coin);
         if (polySnap) {
@@ -784,7 +804,7 @@ export async function fakeTradeRouteWithOptions(
     systemLogger.log(`SHUTDOWN(${signal}): graceful exit`);
 
     polyHub.stop();
-    kalshiHub.stop();
+    kalshiHub?.stop();
     process.exit(0);
   };
 
