@@ -107,12 +107,15 @@ export class KalshiPriceFeed {
       const market = await this.client.getMarket(this.marketTicker);
       const rawLast = extractCents((market as any)?.last_price)
         ?? extractCents((market as any)?.last_price_dollars);
-      if (rawLast !== null) {
-        this.lastPrice = normalizePrice(rawLast);
-        const ts = (market as any)?.last_price_ts ?? (market as any)?.last_trade_ts;
-        this.lastTs = typeof ts === "number" && ts > 0
-          ? (ts >= 1e12 ? ts : ts * 1000)
-          : Date.now();
+      if (rawLast !== null && Number.isFinite(rawLast) && rawLast >= 0) {
+        const normalized = normalizePrice(rawLast);
+        if (Number.isFinite(normalized) && normalized >= 0 && normalized <= 1) {
+          this.lastPrice = normalized;
+          const ts = (market as any)?.last_price_ts ?? (market as any)?.last_trade_ts;
+          this.lastTs = typeof ts === "number" && ts > 0
+            ? (ts >= 1e12 ? ts : ts * 1000)
+            : Date.now();
+        }
       }
 
       const endTs = Math.floor(Date.now() / 1000);
@@ -171,9 +174,16 @@ export class KalshiPriceFeed {
   /** Start background polling. */
   start(): void {
     if (this.intervalId != null) return;
-    this.refresh();
+    // Initial fetch -- catch to prevent unhandled rejection on startup
+    this.refresh().catch(() => {
+      // Will retry on next poll interval
+    });
     this.intervalId = setInterval(() => {
-      if (!this.isCacheFresh()) this.refresh();
+      if (!this.isCacheFresh()) {
+        this.refresh().catch(() => {
+          // Will retry on next poll interval
+        });
+      }
     }, POLL_INTERVAL_MS);
   }
 

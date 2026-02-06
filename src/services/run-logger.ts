@@ -1,10 +1,14 @@
-import { appendFileSync, mkdirSync, existsSync } from "fs";
+import { appendFileSync, mkdirSync, existsSync, statSync, renameSync } from "fs";
 import { dirname } from "path";
 
 type LogLevel = "INFO" | "WARN" | "ERROR";
 
+const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+const ROTATION_CHECK_INTERVAL = 500; // check every N writes
+
 interface RunLoggerOptions {
   stdout?: boolean;
+  maxFileBytes?: number;
 }
 
 export class RunLogger {
@@ -12,11 +16,14 @@ export class RunLogger {
   private maxLines: number;
   private logPath: string;
   private alsoStdout: boolean;
+  private maxFileBytes: number;
+  private writeCount: number = 0;
 
   constructor(logPath: string, maxLines: number = 200, options?: RunLoggerOptions) {
     this.logPath = logPath;
     this.maxLines = maxLines;
     this.alsoStdout = options?.stdout === true;
+    this.maxFileBytes = options?.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.ensureDir();
     this.writeLine(`--- Run started ${new Date().toISOString()} ---`);
   }
@@ -52,9 +59,48 @@ export class RunLogger {
   }
 
   private writeLine(line: string): void {
-    appendFileSync(this.logPath, line + "\n", { encoding: "utf8" });
+    try {
+      appendFileSync(this.logPath, line + "\n", { encoding: "utf8" });
+    } catch {
+      // If write fails (disk full, permissions), don't crash the bot
+    }
     if (this.alsoStdout) {
       process.stdout.write(line + "\n");
+    }
+    this.writeCount += 1;
+    if (this.writeCount % ROTATION_CHECK_INTERVAL === 0) {
+      this.maybeRotate();
+    }
+  }
+
+  private maybeRotate(): void {
+    try {
+      if (!existsSync(this.logPath)) return;
+      const stat = statSync(this.logPath);
+      if (stat.size < this.maxFileBytes) return;
+
+      // Rotate: current → .1, delete .2 if exists
+      const rotatedPath = `${this.logPath}.1`;
+      const oldRotated = `${this.logPath}.2`;
+      try {
+        if (existsSync(oldRotated)) {
+          // Best-effort delete of oldest rotation
+          require("fs").unlinkSync(oldRotated);
+        }
+      } catch { /* ignore */ }
+      try {
+        if (existsSync(rotatedPath)) {
+          renameSync(rotatedPath, oldRotated);
+        }
+      } catch { /* ignore */ }
+      try {
+        renameSync(this.logPath, rotatedPath);
+      } catch { /* ignore */ }
+
+      // Start fresh
+      this.writeLine(`--- Log rotated ${new Date().toISOString()} ---`);
+    } catch {
+      // Rotation is best-effort; never crash the bot for logging
     }
   }
 }

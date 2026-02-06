@@ -16,3 +16,26 @@ services:
       - ./logs:/app/logs
     environment:
       NODE_ENV: production
+
+  arbitrage-bot:
+    build: .
+    command:
+      [
+        "--mode",
+        "fake-trade",
+        "--profiles",
+        "arbBotV1",
+        "--coins",
+        "all",
+        "--headless"
+      ]
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      NODE_ENV: production
+      # Required: set these in .env or pass via docker-compose --env-file
+      # KALSHI_API_KEY: ""
+      # KALSHI_PRIVATE_KEY_PEM: ""
+      # KALSHI_ENV: "demo"
+    stop_grace_period: 10s

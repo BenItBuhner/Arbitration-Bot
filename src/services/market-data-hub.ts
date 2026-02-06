@@ -471,6 +471,7 @@ export class MarketDataHub {
   }
 
   private handleCryptoPrice(payload: CryptoPricePayload): void {
+    if (!Number.isFinite(payload.value) || payload.value <= 0) return;
     const symbolKey = payload.symbol.toLowerCase();
     const coin = SYMBOL_TO_COIN[symbolKey];
     if (!coin) return;
@@ -807,8 +808,8 @@ export class MarketDataHub {
     state.lastReferenceAttemptMs = Date.now();
     state.referenceAttempts += 1;
 
-    fetchHistoricalCryptoPrice(state.symbol, new Date(state.marketStartMs)).then(
-      (historical) => {
+    fetchHistoricalCryptoPrice(state.symbol, new Date(state.marketStartMs))
+      .then((historical) => {
         if (historical && state.referencePrice === 0) {
           state.referencePrice = historical.price;
           state.referencePriceTimestamp = historical.timestamp;
@@ -824,8 +825,13 @@ export class MarketDataHub {
             "WARN",
           );
         }
-      },
-    );
+      })
+      .catch((err) => {
+        this.logger.log(
+          `DATA: ${state.coin.toUpperCase()} reference fetch errored: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
+      });
   }
 
   private isBookFresh(state: MarketDataState, now: number): boolean {
@@ -890,9 +896,15 @@ export class MarketDataHub {
       staleMs >= BOOK_RESET_MS || selectedMs >= BOOK_RESET_MS;
     if (!shouldReset) return;
 
-    // If the WS is still connected, the market is just quiet -- skip the
-    // destructive full reconnect that would kill subscriptions for ALL coins.
+    // If the WS is still connected, try refreshing subscriptions instead of
+    // a destructive full reconnect that would kill subscriptions for ALL coins.
     if (this.marketWs?.isConnected()) {
+      this.logger.log(
+        `DATA: ${state.coin.toUpperCase()} WS connected but book stale -- refreshing subscriptions`,
+        "WARN",
+      );
+      this.refreshMarketWsSubscriptions();
+      this.lastWsResetMs = now;
       return;
     }
 
@@ -913,8 +925,13 @@ export class MarketDataHub {
       staleMs >= PRICE_RESET_MS || selectedMs >= PRICE_RESET_MS;
     if (!shouldReset) return;
 
-    // If the crypto WS is still connected, skip the full reconnect.
+    // If the crypto WS is still connected, try re-subscribing instead of full reconnect.
     if (this.cryptoWs?.isConnected()) {
+      const symbols = Array.from(this.states.values()).map((s) => s.symbol);
+      if (symbols.length > 0) {
+        this.cryptoWs.subscribe(symbols);
+      }
+      this.lastCryptoWsResetMs = now;
       return;
     }
 
@@ -931,6 +948,7 @@ export class MarketDataHub {
     if (!next) return;
 
     const current = this.states.get(coin);
+    const oldTokenIds = current ? [...current.tokenIds] : [];
     if (current) {
       current.tokenIds.forEach((tokenId) => this.tokenToCoin.delete(tokenId));
     }
@@ -938,7 +956,17 @@ export class MarketDataHub {
     this.states.set(coin, next);
     this.registerTokenIds(next);
     this.logger.log(`DATA: ${coin.toUpperCase()} rotating market (sub refresh)`);
-    this.refreshMarketWsSubscriptions();
+
+    // Subscribe new tokens directly instead of full replace (avoids thrashing
+    // when multiple coins rotate simultaneously at market boundaries).
+    if (this.marketWs && this.marketWs.isConnected()) {
+      if (oldTokenIds.length > 0) {
+        this.marketWs.unsubscribe(oldTokenIds);
+      }
+      this.marketWs.subscribe(next.tokenIds);
+    } else {
+      this.connectMarketWs();
+    }
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     }
@@ -955,6 +983,7 @@ export class MarketDataHub {
     }
 
     const current = this.states.get(coin);
+    const oldTokenIds = current ? [...current.tokenIds] : [];
     if (current) {
       current.tokenIds.forEach((tokenId) => this.tokenToCoin.delete(tokenId));
     }
@@ -964,7 +993,16 @@ export class MarketDataHub {
     this.logger.log(
       `DATA: ${coin.toUpperCase()} market reselected (${next.slug})`,
     );
-    this.refreshMarketWsSubscriptions();
+
+    // Subscribe new tokens directly (same approach as rotateMarket)
+    if (this.marketWs && this.marketWs.isConnected()) {
+      if (oldTokenIds.length > 0) {
+        this.marketWs.unsubscribe(oldTokenIds);
+      }
+      this.marketWs.subscribe(next.tokenIds);
+    } else {
+      this.connectMarketWs();
+    }
     if (this.cryptoWs) {
       this.cryptoWs.subscribe([next.symbol]);
     } else {
@@ -1013,6 +1051,11 @@ export class MarketDataHub {
         } else {
           this.connectCryptoWs();
         }
+      } catch (err) {
+        this.logger.log(
+          `DATA: ${coin.toUpperCase()} retry market init errored: ${err instanceof Error ? err.message : "unknown"}`,
+          "ERROR",
+        );
       } finally {
         this.rotatingCoins.delete(coin);
       }

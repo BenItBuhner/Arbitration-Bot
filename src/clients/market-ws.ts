@@ -176,7 +176,7 @@ export class MarketWS {
     if (typeof data === "object" && data !== null) {
       if (this.config.debug) {
         console.log(
-          "🔍 DEBUG - Received event:",
+          "DEBUG - Received event:",
           JSON.stringify(data, null, 2),
         );
       }
@@ -251,7 +251,9 @@ export class MarketWS {
     try {
       this.ws.send(JSON.stringify(message));
     } catch (error) {
-      console.error("❌ Failed to send subscription:", error);
+      if (!this.config.silent) {
+        console.error("Failed to send subscription:", error);
+      }
     }
   }
 
@@ -270,10 +272,12 @@ export class MarketWS {
       try {
         this.ws.send(JSON.stringify(message));
         if (!this.config.silent) {
-          console.log(`📡 Unsubscribed from ${tokenIds.length} token(s)`);
+          console.log(`Unsubscribed from ${tokenIds.length} token(s)`);
         }
       } catch (error) {
-        console.error("❌ Failed to send unsubscription:", error);
+        if (!this.config.silent) {
+          console.error("Failed to send unsubscription:", error);
+        }
       }
     }
   }
@@ -289,7 +293,9 @@ export class MarketWS {
         try {
           this.ws.send("PING");
         } catch (error) {
-          console.error("❌ Failed to send PING:", error);
+          if (!this.config.silent) {
+            console.error("Failed to send PING:", error);
+          }
         }
       }
     }, this.config.pingInterval);

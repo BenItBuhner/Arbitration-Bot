@@ -255,7 +255,8 @@ function resolveSeriesTicker(market: Record<string, unknown>): string | null {
   return null;
 }
 
-function parseStrikePrice(market: Record<string, unknown>): number {
+/** Exported for testing. */
+export function parseStrikePrice(market: Record<string, unknown>): number {
   const strikeBlock =
     market.strike && typeof market.strike === "object" ? market.strike : null;
   const strikeTypeRaw = String(
@@ -301,6 +302,8 @@ function parseStrikePrice(market: Record<string, unknown>): number {
     return floorStrike;
   }
 
+  // Deep search -- deliberately EXCLUDES cents-denominated keys since
+  // those need special scale handling in the candidates array below.
   const strikeKeys = new Set([
     "floor_strike",
     "cap_strike",
@@ -309,7 +312,6 @@ function parseStrikePrice(market: Record<string, unknown>): number {
     "strike_price",
     "strike_price_decimal",
     "strike_price_dollars",
-    "strike_price_cents",
     "strike",
     "price_to_beat",
     "priceToBeat",
@@ -363,7 +365,8 @@ function parseStrikePrice(market: Record<string, unknown>): number {
   return 0;
 }
 
-function isMarketOpen(market: Record<string, unknown>): boolean {
+/** Exported for testing. */
+export function isMarketOpen(market: Record<string, unknown>): boolean {
   const status = String(market.status ?? "").toLowerCase();
   if (status === "open" || status === "active") return true;
   if (
@@ -753,8 +756,12 @@ export class KalshiMarketDataHub {
       if (fetched) {
         detailedMarket = fetched as Record<string, unknown>;
       }
-    } catch {
+    } catch (err) {
       detailedMarket = null;
+      this.logger.log(
+        `DATA: Kalshi detailed market fetch failed for ${selectedTicker}: ${err instanceof Error ? err.message : "unknown"}`,
+        "WARN",
+      );
     }
 
     const marketData = detailedMarket
@@ -791,6 +798,13 @@ export class KalshiMarketDataHub {
     if (strike <= 0 && underlyingValue !== null && underlyingValue > 0) {
       referencePrice = underlyingValue;
       referenceSource = "kalshi_underlying";
+    }
+
+    if (strike <= 0 && (underlyingValue === null || underlyingValue <= 0)) {
+      this.logger.log(
+        `DATA: Kalshi ${coin.toUpperCase()} ${selectedTicker} threshold unavailable at init (strike=0, underlying=${underlyingValue ?? "null"}) -- will retry via refresh`,
+        "WARN",
+      );
     }
 
     const state: KalshiMarketState = {
@@ -922,6 +936,7 @@ export class KalshiMarketDataHub {
   }
 
   private handleCryptoPrice(payload: CryptoPricePayload): void {
+    if (!Number.isFinite(payload.value) || payload.value <= 0) return;
     const symbolKey = payload.symbol.toLowerCase();
     const coin = SYMBOL_TO_COIN[symbolKey];
     if (!coin) return;
@@ -1116,7 +1131,12 @@ export class KalshiMarketDataHub {
 
         maybeUpdateOutcomeLabels(state);
       })
-      .catch(() => {});
+      .catch((err) => {
+        this.logger.log(
+          `DATA: Kalshi reference refresh error: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
+      });
   }
 
   private maybeRefreshHtmlReference(state: KalshiMarketState, now: number): void {
@@ -1244,7 +1264,12 @@ export class KalshiMarketDataHub {
         now - state.lastReselectMs >= MARKET_RESELECT_COOLDOWN_MS
       ) {
         state.lastReselectMs = now;
-        this.rotateMarket(state.coin).catch(() => {});
+        this.rotateMarket(state.coin).catch((err) => {
+          this.logger.log(
+            `DATA: Kalshi rotate-close error ${state.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+            "ERROR",
+          );
+        });
         continue;
       }
 
@@ -1258,7 +1283,12 @@ export class KalshiMarketDataHub {
           `DATA: Kalshi reselecting ${state.coin.toUpperCase()} (stale data)`,
           "WARN",
         );
-        this.rotateMarket(state.coin).catch(() => {});
+        this.rotateMarket(state.coin).catch((err) => {
+          this.logger.log(
+            `DATA: Kalshi rotate error ${state.coin.toUpperCase()}: ${err instanceof Error ? err.message : "unknown"}`,
+            "ERROR",
+          );
+        });
       }
     }
   }
@@ -1336,6 +1366,10 @@ export class KalshiMarketDataHub {
     if (current) {
       current.priceFeed?.stop();
       this.tickerToCoin.delete(current.marketTicker);
+      // Clean up orderbook state for rotated market to prevent memory leak
+      if (this.kalshiWs) {
+        this.kalshiWs.removeOrderbook(current.marketTicker);
+      }
     }
 
     this.states.set(coin, next);

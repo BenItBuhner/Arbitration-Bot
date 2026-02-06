@@ -24,4 +24,34 @@ describe("kalshi url helpers", () => {
     expect(looksLikeKalshiMarketTicker("KXETH15M-26FEB021730")).toBe(true);
     expect(looksLikeKalshiMarketTicker("KXETH15M")).toBe(false);
   });
+
+  it("derives series for BTC and SOL tickers", () => {
+    expect(deriveSeriesTickerFromMarket("KXBTC15M-26FEB051530")).toBe("KXBTC15M");
+    expect(deriveSeriesTickerFromMarket("KXSOL15M-26FEB051530")).toBe("KXSOL15M");
+  });
+
+  it("returns null for tickers without dash", () => {
+    expect(deriveSeriesTickerFromMarket("NODASH")).toBeNull();
+    expect(deriveSeriesTickerFromMarket("")).toBeNull();
+  });
+
+  it("handles demo API URLs", () => {
+    const parsed = parseKalshiMarketUrl(
+      "https://demo-api.kalshi.co/markets/kxbtc15m/kxbtc15m-26feb051530",
+    );
+    expect(parsed.marketTicker).toBe("KXBTC15M-26FEB051530");
+    expect(parsed.seriesTicker).toBe("KXBTC15M");
+  });
+
+  it("returns null for non-URL input", () => {
+    const parsed = parseKalshiMarketUrl("");
+    expect(parsed.marketTicker).toBeNull();
+    expect(parsed.seriesTicker).toBeNull();
+  });
+
+  it("returns null for invalid URL", () => {
+    const parsed = parseKalshiMarketUrl("not-a-url");
+    expect(parsed.marketTicker).toBeNull();
+    expect(parsed.seriesTicker).toBeNull();
+  });
 });

@@ -72,26 +72,33 @@ function clamp(value: number, min: number, max: number): number {
 
 function computeVolatility(values: number[]): number | null {
   if (values.length < 2) return null;
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const finiteValues = values.filter(Number.isFinite);
+  if (finiteValues.length < 2) return null;
+  const mean = finiteValues.reduce((sum, value) => sum + value, 0) / finiteValues.length;
   let variance = 0;
-  for (const value of values) {
+  for (const value of finiteValues) {
     const diff = value - mean;
     variance += diff * diff;
   }
-  variance /= values.length;
-  return Math.sqrt(variance);
+  variance /= finiteValues.length;
+  const result = Math.sqrt(variance);
+  return Number.isFinite(result) ? result : null;
 }
 
 function computeEWMomentum(values: number[], alpha: number): number | null {
   if (values.length < 2) return null;
   const safeAlpha = clamp(alpha, 0.01, 0.99);
   let ema = values[0] ?? 0;
+  if (!Number.isFinite(ema)) return null;
   for (let i = 1; i < values.length; i += 1) {
-    const value = values[i] ?? ema;
+    const value = values[i];
+    if (value === undefined || !Number.isFinite(value)) continue;
     ema = safeAlpha * value + (1 - safeAlpha) * ema;
   }
-  const last = values[values.length - 1] ?? ema;
-  return last - ema;
+  const last = values[values.length - 1];
+  if (last === undefined || !Number.isFinite(last)) return null;
+  const result = last - ema;
+  return Number.isFinite(result) ? result : null;
 }
 
 function computeLogReturnVolatility(values: number[]): number | null {

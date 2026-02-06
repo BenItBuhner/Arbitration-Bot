@@ -94,6 +94,8 @@ function normalizeLevels(raw: unknown, useDollars: boolean): KalshiOrderbookLeve
     const price = useDollars ? toNumber(priceRaw) : normalizePriceDollars(priceRaw, null);
     const size = toNumber(sizeRaw);
     if (price === null || size === null) continue;
+    if (!Number.isFinite(price) || price < 0) continue;
+    if (!Number.isFinite(size) || size < 0) continue;
     levels.push({ price, size });
   }
   return levels;
@@ -158,6 +160,9 @@ class KalshiOrderbookState {
   }
 }
 
+const KALSHI_PING_INTERVAL_MS = 30_000;
+const KALSHI_PONG_TIMEOUT_MS = 90_000;
+
 export class KalshiMarketWS {
   private ws: WebSocket | null = null;
   private config: KalshiWsConfig;
@@ -166,6 +171,8 @@ export class KalshiMarketWS {
   private subscriptions: Set<string> = new Set();
   private orderbooks: Map<string, KalshiOrderbookState> = new Map();
   private privateKeyPem: string;
+  private pingInterval: NodeJS.Timeout | null = null;
+  private lastMessageMs: number = 0;
 
   private onOrderbook: KalshiOrderbookCallback;
   private onTrade: KalshiTradeCallback;
@@ -212,12 +219,20 @@ export class KalshiMarketWS {
       // Keep default path
     }
 
-    const headers = createKalshiAuthHeaders({
-      apiKey: this.kalshiConfig.apiKey,
-      privateKeyPem: this.privateKeyPem,
-      method: "GET",
-      path: wsPath,
-    });
+    let headers: Record<string, string>;
+    try {
+      headers = createKalshiAuthHeaders({
+        apiKey: this.kalshiConfig.apiKey,
+        privateKeyPem: this.privateKeyPem,
+        method: "GET",
+        path: wsPath,
+      });
+    } catch (authErr) {
+      this.onError(
+        new Error(`Kalshi auth header creation failed: ${authErr instanceof Error ? authErr.message : "unknown"}`),
+      );
+      return;
+    }
 
     try {
       const ws = new (WebSocket as any)(this.kalshiConfig.wsUrl, {
@@ -227,6 +242,11 @@ export class KalshiMarketWS {
 
       ws.onopen = () => {
         this.reconnectAttempts = 0;
+        this.lastMessageMs = Date.now();
+        // Clear stale orderbook state -- fresh snapshots will arrive
+        // after re-subscribing. Keeping old state would be misleading.
+        this.orderbooks.clear();
+        this.startPing();
         this.onConnectionChange(true);
         if (this.subscriptions.size > 0) {
           this.sendSubscribe(Array.from(this.subscriptions));
@@ -234,6 +254,7 @@ export class KalshiMarketWS {
       };
 
       ws.onmessage = (event: any) => {
+        this.lastMessageMs = Date.now();
         const data = typeof event.data === "string" ? event.data : "";
         if (!data) return;
         try {
@@ -247,6 +268,7 @@ export class KalshiMarketWS {
       };
 
       ws.onclose = () => {
+        this.stopPing();
         this.onConnectionChange(false);
         if (!this.isManuallyClosed) {
           this.attemptReconnect();
@@ -263,12 +285,49 @@ export class KalshiMarketWS {
 
   disconnect(): void {
     this.isManuallyClosed = true;
+    this.stopPing();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
     this.subscriptions.clear();
     this.orderbooks.clear();
+  }
+
+  /** Remove orderbook state for a rotated-away ticker to prevent memory leaks. */
+  removeOrderbook(ticker: string): void {
+    this.orderbooks.delete(ticker);
+  }
+
+  isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // Check if connection is zombie (no messages in PONG_TIMEOUT)
+        if (this.lastMessageMs > 0 && Date.now() - this.lastMessageMs > KALSHI_PONG_TIMEOUT_MS) {
+          this.onError(new Error("Kalshi WS zombie connection (no messages in 90s)"));
+          this.ws.close();
+          return;
+        }
+        try {
+          // Send protocol-level ping frame to keep connection alive
+          this.ws.ping();
+        } catch {
+          // Ignore ping errors
+        }
+      }
+    }, KALSHI_PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
   }
 
   subscribe(

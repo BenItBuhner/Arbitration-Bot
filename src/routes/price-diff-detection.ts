@@ -1022,11 +1022,14 @@ export async function priceDiffDetectionRoute(
     }
   }, RENDER_INTERVAL_MS);
 
-  process.on("SIGINT", () => {
+  const gracefulShutdown = () => {
     clearInterval(timer);
     cleanupNavigation();
     polyHub.stop();
     kalshiHub.stop();
     process.exit(0);
-  });
+  };
+
+  process.on("SIGINT", gracefulShutdown);
+  process.on("SIGTERM", gracefulShutdown);
 }

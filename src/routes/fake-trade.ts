@@ -453,27 +453,111 @@ export async function fakeTradeRouteWithOptions(
     stdout: options.headless === true,
   });
 
+  // ── Pre-flight environment check ────────────────────────────────
+  const preflightIssues: string[] = [];
+  if (!process.env.KALSHI_API_KEY) {
+    preflightIssues.push("KALSHI_API_KEY is not set");
+  }
+  if (!process.env.KALSHI_PRIVATE_KEY_PATH && !process.env.KALSHI_PRIVATE_KEY_PEM) {
+    preflightIssues.push("Neither KALSHI_PRIVATE_KEY_PATH nor KALSHI_PRIVATE_KEY_PEM is set");
+  }
+  if (preflightIssues.length > 0) {
+    systemLogger.log("STARTUP ERROR: Missing required environment variables", "ERROR");
+    for (const issue of preflightIssues) {
+      systemLogger.log(`  - ${issue}`, "ERROR");
+    }
+    if (!options.headless) {
+      console.log("\nSTARTUP ERROR: Missing required environment variables:");
+      for (const issue of preflightIssues) {
+        console.log(`  - ${issue}`);
+      }
+    }
+    console.log("\nSee .env.example for required configuration.");
+    console.log("Set KALSHI_ENV=demo for demo mode, or KALSHI_ENV=prod for production.\n");
+    return;
+  }
+
   let kalshiConfig;
   try {
     kalshiConfig = getKalshiEnvConfig();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Kalshi config error.";
+    systemLogger.log(`STARTUP: ${message}`, "ERROR");
     console.log(message);
     return;
   }
 
   const polyHub = new MarketDataHub(systemLogger, { requireCryptoPrice: false });
-  const kalshiHub = new KalshiMarketDataHub(
-    systemLogger,
-    kalshiConfig,
-    kalshiSelectorsByCoin,
-    { requireCryptoPrice: false },
+  let kalshiHub: KalshiMarketDataHub | null = null;
+  try {
+    kalshiHub = new KalshiMarketDataHub(
+      systemLogger,
+      kalshiConfig,
+      kalshiSelectorsByCoin,
+      { requireCryptoPrice: false },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Kalshi hub creation failed: ${msg}`, "ERROR");
+    systemLogger.log("STARTUP: Running in Polymarket-only mode (Kalshi data unavailable)", "WARN");
+  }
+
+  try {
+    await polyHub.start(resolvedCoins);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Polymarket hub start failed: ${msg}`, "ERROR");
+  }
+
+  if (kalshiHub) {
+    try {
+      await kalshiHub.start(resolvedCoins);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      systemLogger.log(`STARTUP: Kalshi hub start failed: ${msg}`, "ERROR");
+    }
+  }
+
+  // ── Startup health check ──────────────────────────────────────
+  systemLogger.log(
+    `STARTUP: profiles=[${resolvedProfiles.join(",")}] coins=[${resolvedCoins.join(",")}] headless=${options.headless ?? false}`,
   );
+  for (const profile of profiles) {
+    if (!resolvedProfiles.includes(profile.name)) continue;
+    for (const coin of resolvedCoins) {
+      const cfg = profile.coins.get(coin);
+      if (cfg) {
+        systemLogger.log(
+          `STARTUP: ${profile.name}/${coin.toUpperCase()} minGap=${cfg.minGap} fillUsd=${cfg.fillUsd} tradeAllowed=${cfg.tradeAllowedTimeLeft}s tradeStop=${cfg.tradeStopTimeLeft ?? "null"}`,
+        );
+      }
+    }
+  }
+  // Log initial market selections
+  const polyInitialSnaps = polyHub.getSnapshots();
+  const kalshiInitialSnaps = kalshiHub?.getSnapshots() ?? new Map();
+  for (const coin of resolvedCoins) {
+    const polySnap = polyInitialSnaps.get(coin);
+    const kalshiSnap = kalshiInitialSnaps.get(coin);
+    systemLogger.log(
+      `STARTUP: ${coin.toUpperCase()} polyMarket=${polySnap?.slug ?? "pending"} kalshiMarket=${kalshiSnap?.slug ?? "pending"} polyThreshold=${polySnap?.priceToBeat ?? "n/a"} kalshiThreshold=${kalshiSnap?.priceToBeat ?? "n/a"}`,
+    );
+  }
 
-  await polyHub.start(resolvedCoins);
-  await kalshiHub.start(resolvedCoins);
-
-  const kalshiOutcomeClient = new KalshiClient(kalshiConfig);
+  let kalshiOutcomeClient: KalshiClient;
+  try {
+    kalshiOutcomeClient = new KalshiClient(kalshiConfig);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    systemLogger.log(`STARTUP: Kalshi outcome client failed: ${msg}`, "ERROR");
+    // Create a stub that returns null for everything
+    kalshiOutcomeClient = {
+      getMarket: async () => null,
+      getMarkets: async () => ({ markets: [], cursor: undefined }),
+      searchMarkets: async () => [],
+      getEvent: async () => null,
+    } as any;
+  }
   const profileEngines: ArbitrageEngine[] = [];
   const profileCoinsByName = new Map<string, CoinSymbol[]>();
   const activeCoinIndexByProfile = new Map<string, number>();
@@ -526,7 +610,7 @@ export async function fakeTradeRouteWithOptions(
   if (profileEngines.length === 0) {
     systemLogger.log("No profiles eligible for selected coins.", "WARN");
     polyHub.stop();
-    kalshiHub.stop();
+    kalshiHub?.stop();
     return;
   }
 
@@ -581,13 +665,18 @@ export async function fakeTradeRouteWithOptions(
       )
     : () => {};
 
-  // ── Fast evaluation loop (1ms) ───────────────────────────────────
+  // ── Fast evaluation loop ─────────────────────────────────────────
   // The arb engine must react to opportunities sub-millisecond.
   // setInterval floors to 1ms in Node; this is the fastest poll possible.
+  // Override via ARB_EVAL_INTERVAL_MS if needed (e.g. for low-power machines).
+  const ARB_EVAL_INTERVAL_MS = Math.max(
+    1,
+    Number(process.env.ARB_EVAL_INTERVAL_MS) || 1,
+  );
   const evalTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
-      const kalshiSnapshots = kalshiHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub?.getSnapshots() ?? new Map();
       const now = Date.now();
       for (const engine of profileEngines) {
         engine.evaluate(polySnapshots, kalshiSnapshots, now);
@@ -597,14 +686,14 @@ export async function fakeTradeRouteWithOptions(
         error instanceof Error ? error.message : "Unknown error in eval loop.";
       systemLogger.log(`Arbitrage eval error: ${message}`, "ERROR");
     }
-  }, 1);
+  }, ARB_EVAL_INTERVAL_MS);
 
   // ── Render loop (250ms) ────────────────────────────────────────
   // Dashboard rendering and odds history are visual-only; 4 fps for snappy UI.
   const renderTimer = setInterval(() => {
     try {
       const polySnapshots = polyHub.getSnapshots();
-      const kalshiSnapshots = kalshiHub.getSnapshots();
+      const kalshiSnapshots = kalshiHub?.getSnapshots() ?? new Map();
       for (const coin of resolvedCoins) {
         const polySnap = polySnapshots.get(coin);
         if (polySnap) {
@@ -700,12 +789,25 @@ export async function fakeTradeRouteWithOptions(
     }
   }, 250);
 
-  process.on("SIGINT", () => {
+  const gracefulShutdown = (signal: string) => {
     clearInterval(evalTimer);
     clearInterval(renderTimer);
     cleanupNavigation();
+
+    // Log final summary before shutdown
+    for (const engine of profileEngines) {
+      const summary = engine.getSummary();
+      systemLogger.log(
+        `SHUTDOWN(${signal}): ${engine.getName()} trades=${summary.totalTrades} wins=${summary.wins} losses=${summary.losses} profit=${summary.totalProfit.toFixed(2)} runtime=${summary.runtimeSec.toFixed(0)}s`,
+      );
+    }
+    systemLogger.log(`SHUTDOWN(${signal}): graceful exit`);
+
     polyHub.stop();
-    kalshiHub.stop();
+    kalshiHub?.stop();
     process.exit(0);
-  });
+  };
+
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 }

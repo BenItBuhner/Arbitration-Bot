@@ -20,6 +20,9 @@ import {
 } from "./outcome-resolution";
 
 const DECISION_COOLDOWN_MS = 200;
+const POSITION_MAX_AGE_MS = parseEnvNumber("ARB_POSITION_MAX_AGE_MS", 300_000, 30_000);
+const POSITION_MAX_UNRESOLVED_MS = parseEnvNumber("ARB_POSITION_MAX_UNRESOLVED_MS", 600_000, 60_000);
+const THRESHOLD_DIVERGENCE_MAX = parseEnvNumber("ARB_THRESHOLD_DIVERGENCE_PCT", 0.5, 0) / 100; // env is in %, internal is fraction
 const EXEC_DELAY_MIN_ENV = parseEnvNumber("EXECUTION_DELAY_MIN_MS", 250, 0);
 const EXEC_DELAY_MAX_ENV = parseEnvNumber("EXECUTION_DELAY_MAX_MS", 300, 0);
 const { min: EXEC_DELAY_MIN_MS, max: EXEC_DELAY_MAX_MS } = resolveDelayRange(
@@ -197,6 +200,8 @@ interface CoinState {
     downYesSource: EstimateSource | null;
     selected: ArbitrageDirection | null;
   };
+  lastSkipReason: string | null;
+  lastSkipLogMs: number;
 }
 
 export interface ArbitrageEngineOptions {
@@ -334,165 +339,19 @@ export class ArbitrageEngine {
     let openExposure = 0;
 
     for (const [coin, config] of this.configs.entries()) {
-      const state = this.states.get(coin) ?? this.createState();
-      const polySnap = polySnapshots.get(coin);
-      const kalshiSnap = kalshiSnapshots.get(coin);
-
-      if (polySnap && kalshiSnap) {
-        state.lastSnapshots = { poly: polySnap, kalshi: kalshiSnap };
-      }
-
-      if (state.position) {
-        if (polySnap && kalshiSnap) {
-          const currentKey = buildMarketKey(polySnap, kalshiSnap);
-          if (currentKey === state.position.marketKey) {
-            state.position.polySnap = polySnap;
-            state.position.kalshiSnap = kalshiSnap;
-          }
-        }
-        openExposure += state.position.costTotal;
-        this.maybeResolvePosition(state, nowMs);
-        this.states.set(coin, state);
-        continue;
-      }
-
-      if (state.pendingOrder) {
-        if (
-          !polySnap ||
-          !kalshiSnap ||
-          buildMarketKey(polySnap, kalshiSnap) !== state.pendingOrder.marketKey
-        ) {
-          this.logger.log(
-            `${coin.toUpperCase()} pending order canceled (market changed)`,
-            "WARN",
-          );
-          state.pendingOrder = null;
-        } else if (nowMs >= state.pendingOrder.dueMs) {
-          this.confirmPendingOrder(state, config, polySnap, kalshiSnap, nowMs);
-        }
-        this.states.set(coin, state);
-        continue;
-      }
-
-      if (!polySnap || !kalshiSnap) {
-        this.states.set(coin, state);
-        continue;
-      }
-
-      const marketKey = buildMarketKey(polySnap, kalshiSnap);
-      const timeLeft = resolveMinTimeLeft(polySnap, kalshiSnap);
-      const fillBudget = resolveFillBudget(config);
-
-      // Always compute display estimates when possible (even if trade not allowed yet).
-      if (fillBudget) {
-        const rawUpNo = computeDisplayEstimate(
-        "upNo",
-        polySnap,
-        kalshiSnap,
-        fillBudget,
-        );
-        const rawDownYes = computeDisplayEstimate(
-        "downYes",
-        polySnap,
-        kalshiSnap,
-        fillBudget,
-        );
-        state.lastEstimates = {
-          upNo: rawUpNo?.estimate ?? null,
-          downYes: rawDownYes?.estimate ?? null,
-          upNoSource: rawUpNo?.source ?? null,
-          downYesSource: rawDownYes?.source ?? null,
-          selected: null,
-        };
-      } else {
-        state.lastEstimates = {
-          upNo: null,
-          downYes: null,
-          upNoSource: null,
-          downYesSource: null,
-          selected: null,
-        };
-      }
-
-      if (timeLeft === null) {
-        this.states.set(coin, state);
-        continue;
-      }
-      if (timeLeft > config.tradeAllowedTimeLeft) {
-        this.states.set(coin, state);
-        continue;
-      }
-      if (config.tradeStopTimeLeft !== null && timeLeft <= config.tradeStopTimeLeft) {
-        this.states.set(coin, state);
-        continue;
-      }
-
-      if (!isFreshEnough(config, polySnap, kalshiSnap, nowMs)) {
-        this.states.set(coin, state);
-        continue;
-      }
-
-      if (!fillBudget) {
-        this.states.set(coin, state);
-        continue;
-      }
-
-      const upNo = buildCandidate(
-        "upNo",
-        polySnap,
-        kalshiSnap,
-        fillBudget,
-        config,
-      );
-      const downYes = buildCandidate(
-        "downYes",
-        polySnap,
-        kalshiSnap,
-        fillBudget,
-        config,
-      );
-
-      const selected = chooseCandidate(upNo, downYes);
-      state.lastEstimates.selected = selected?.direction ?? null;
-
-      if (!selected) {
-        this.states.set(coin, state);
-        continue;
-      }
-
-      if (nowMs - state.lastDecisionMs < DECISION_COOLDOWN_MS) {
-        this.states.set(coin, state);
-        continue;
-      }
-      state.lastDecisionMs = nowMs;
-
-      const delayMs =
-        this.decisionLatencyMs !== null
-          ? this.decisionLatencyMs
-          : randomDelayMs(EXEC_DELAY_MIN_MS, EXEC_DELAY_MAX_MS);
-
-      state.pendingOrder = {
-        dueMs: nowMs + delayMs,
-        direction: selected.direction,
-        marketKey,
-        candidate: selected.estimate,
-        originalGap: selected.estimate.gap,
-        polyTarget: selected.polyTarget,
-        kalshiTarget: selected.kalshiTarget,
-        delayMs,
-        committedAtMs: nowMs,
-      };
-
-      if (!this.summaryOnly) {
+      try {
+        this.evaluateCoin(coin, config, polySnapshots, kalshiSnapshots, nowMs);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
         this.logger.log(
-          `${coin.toUpperCase()} ARB_CANDIDATE ${selected.direction} gap=${selected.estimate.gap.toFixed(
-            4,
-          )} shares=${selected.estimate.shares} cost=${selected.estimate.totalCost.toFixed(
-            2,
-          )} delay=${delayMs}ms`,
+          `${coin.toUpperCase()} EVAL_ERROR: ${message}`,
+          "ERROR",
         );
       }
-      this.states.set(coin, state);
+      const state = this.states.get(coin);
+      if (state?.position) {
+        openExposure += state.position.costTotal;
+      }
     }
 
     this.summary.openExposure = openExposure;
@@ -516,7 +375,238 @@ export class ArbitrageEngine {
         downYesSource: null,
         selected: null,
       },
+      lastSkipReason: null,
+      lastSkipLogMs: 0,
     };
+  }
+
+  private evaluateCoin(
+    coin: CoinSymbol,
+    config: ArbitrageCoinConfig,
+    polySnapshots: Map<CoinSymbol, MarketSnapshot>,
+    kalshiSnapshots: Map<CoinSymbol, MarketSnapshot>,
+    nowMs: number,
+  ): void {
+    const state = this.states.get(coin) ?? this.createState();
+    const polySnap = polySnapshots.get(coin);
+    const kalshiSnap = kalshiSnapshots.get(coin);
+
+    if (polySnap && kalshiSnap) {
+      state.lastSnapshots = { poly: polySnap, kalshi: kalshiSnap };
+    }
+
+    if (state.position) {
+      if (polySnap && kalshiSnap) {
+        const currentKey = buildMarketKey(polySnap, kalshiSnap);
+        if (currentKey === state.position.marketKey) {
+          state.position.polySnap = polySnap;
+          state.position.kalshiSnap = kalshiSnap;
+        }
+      }
+      this.maybeResolvePosition(state, nowMs);
+      this.states.set(coin, state);
+      return;
+    }
+
+    if (state.pendingOrder) {
+      if (
+        !polySnap ||
+        !kalshiSnap ||
+        buildMarketKey(polySnap, kalshiSnap) !== state.pendingOrder.marketKey
+      ) {
+        this.logger.log(
+          `${coin.toUpperCase()} pending order canceled (market changed)`,
+          "WARN",
+        );
+        state.pendingOrder = null;
+      } else if (nowMs >= state.pendingOrder.dueMs) {
+        this.confirmPendingOrder(state, config, polySnap, kalshiSnap, nowMs);
+      }
+      this.states.set(coin, state);
+      return;
+    }
+
+    if (!polySnap || !kalshiSnap) {
+      this.skipCoin(state, coin, "missing_snapshot", nowMs);
+      return;
+    }
+
+    const timeLeft = resolveMinTimeLeft(polySnap, kalshiSnap);
+    const fillBudget = resolveFillBudget(config);
+
+    // Always compute display estimates when possible (even if trade not allowed yet).
+    if (fillBudget) {
+      const rawUpNo = computeDisplayEstimate(
+        "upNo",
+        polySnap,
+        kalshiSnap,
+        fillBudget,
+      );
+      const rawDownYes = computeDisplayEstimate(
+        "downYes",
+        polySnap,
+        kalshiSnap,
+        fillBudget,
+      );
+      state.lastEstimates = {
+        upNo: rawUpNo?.estimate ?? null,
+        downYes: rawDownYes?.estimate ?? null,
+        upNoSource: rawUpNo?.source ?? null,
+        downYesSource: rawDownYes?.source ?? null,
+        selected: null,
+      };
+    } else {
+      state.lastEstimates = {
+        upNo: null,
+        downYes: null,
+        upNoSource: null,
+        downYesSource: null,
+        selected: null,
+      };
+    }
+
+    if (timeLeft === null) {
+      this.skipCoin(state, coin, "time_unknown", nowMs);
+      return;
+    }
+    if (timeLeft <= 0) {
+      this.skipCoin(state, coin, "market_closed", nowMs);
+      return;
+    }
+    if (timeLeft > config.tradeAllowedTimeLeft) {
+      this.skipCoin(state, coin, `waiting (${Math.round(timeLeft)}s left, allowed<=${config.tradeAllowedTimeLeft}s)`, nowMs);
+      return;
+    }
+    if (config.tradeStopTimeLeft !== null && timeLeft <= config.tradeStopTimeLeft) {
+      this.skipCoin(state, coin, `stopped (${Math.round(timeLeft)}s left, stop<=${config.tradeStopTimeLeft}s)`, nowMs);
+      return;
+    }
+
+    if (!isFreshEnough(config, polySnap, kalshiSnap, nowMs)) {
+      this.skipCoin(state, coin, `stale_data (poly=${polySnap.dataStatus} kalshi=${kalshiSnap.dataStatus})`, nowMs);
+      return;
+    }
+
+    if (!fillBudget) {
+      this.skipCoin(state, coin, "no_fill_budget", nowMs);
+      return;
+    }
+
+    // ── Threshold validation: both platforms must have resolvable thresholds ──
+    const polyThreshold = resolveThreshold(polySnap);
+    const kalshiThreshold = resolveThreshold(kalshiSnap);
+    if (!polyThreshold.value || polyThreshold.value <= 0) {
+      this.skipCoin(state, coin, `poly_threshold_missing (src=${polyThreshold.source})`, nowMs);
+      return;
+    }
+    if (!kalshiThreshold.value || kalshiThreshold.value <= 0) {
+      this.skipCoin(state, coin, `kalshi_threshold_missing (src=${kalshiThreshold.source})`, nowMs);
+      return;
+    }
+
+    // ── Threshold divergence check ──────────────────────────────
+    // The arbitrage assumes both platforms resolve the same direction.
+    // If thresholds differ significantly, the outcome could diverge
+    // (e.g., price between the two thresholds → one is UP, other is DOWN).
+    // This would cause a TOTAL LOSS on both legs.
+    const thresholdDivergence = Math.abs(polyThreshold.value - kalshiThreshold.value);
+    const thresholdDivergencePct = thresholdDivergence / Math.min(polyThreshold.value, kalshiThreshold.value);
+    if (THRESHOLD_DIVERGENCE_MAX > 0 && thresholdDivergencePct > THRESHOLD_DIVERGENCE_MAX) {
+      this.skipCoin(
+        state,
+        coin,
+        `threshold_divergence poly=${polyThreshold.value.toFixed(2)} kalshi=${kalshiThreshold.value.toFixed(2)} diff=${(thresholdDivergencePct * 100).toFixed(2)}%`,
+        nowMs,
+      );
+      return;
+    }
+
+    const upNo = buildCandidate(
+      "upNo",
+      polySnap,
+      kalshiSnap,
+      fillBudget,
+      config,
+    );
+    const downYes = buildCandidate(
+      "downYes",
+      polySnap,
+      kalshiSnap,
+      fillBudget,
+      config,
+    );
+
+    const selected = chooseCandidate(upNo, downYes);
+    state.lastEstimates.selected = selected?.direction ?? null;
+
+    if (!selected) {
+      this.states.set(coin, state);
+      return;
+    }
+
+    if (nowMs - state.lastDecisionMs < DECISION_COOLDOWN_MS) {
+      this.states.set(coin, state);
+      return;
+    }
+    state.lastDecisionMs = nowMs;
+
+    const delayMs =
+      this.decisionLatencyMs !== null
+        ? this.decisionLatencyMs
+        : randomDelayMs(EXEC_DELAY_MIN_MS, EXEC_DELAY_MAX_MS);
+
+    state.pendingOrder = {
+      dueMs: nowMs + delayMs,
+      direction: selected.direction,
+      marketKey: buildMarketKey(polySnap, kalshiSnap),
+      candidate: selected.estimate,
+      originalGap: selected.estimate.gap,
+      polyTarget: selected.polyTarget,
+      kalshiTarget: selected.kalshiTarget,
+      delayMs,
+      committedAtMs: nowMs,
+    };
+
+    if (!this.summaryOnly) {
+      this.logger.log(
+        `${coin.toUpperCase()} ARB_CANDIDATE ${selected.direction} gap=${selected.estimate.gap.toFixed(
+          4,
+        )} shares=${selected.estimate.shares} cost=${selected.estimate.totalCost.toFixed(
+          2,
+        )} delay=${delayMs}ms polyThreshold=${polyThreshold.value} kalshiThreshold=${kalshiThreshold.value}`,
+      );
+    }
+    this.states.set(coin, state);
+  }
+
+  /**
+   * Log why a coin was skipped. Only logs when the reason changes or
+   * every 30s to avoid spamming. This is invaluable for diagnosing
+   * "why isn't it trading?" issues.
+   */
+  private skipCoin(
+    state: CoinState,
+    coin: CoinSymbol,
+    reason: string,
+    nowMs: number,
+  ): void {
+    // Log less frequently for expected skip states (waiting/stopped),
+    // more frequently for actionable ones (stale_data, threshold_missing)
+    const isExpected = reason.startsWith("waiting") || reason.startsWith("market_closed");
+    const intervalMs = isExpected ? 120_000 : 30_000;
+    const reasonChanged = state.lastSkipReason !== reason;
+    const logDue = nowMs - state.lastSkipLogMs >= intervalMs;
+
+    if (reasonChanged || logDue) {
+      if (!this.summaryOnly) {
+        this.logger.log(
+          `${coin.toUpperCase()} SKIP: ${reason}`,
+        );
+      }
+      state.lastSkipReason = reason;
+      state.lastSkipLogMs = nowMs;
+    }
+    this.states.set(coin, state);
   }
 
   private confirmPendingOrder(
@@ -529,22 +619,68 @@ export class ArbitrageEngine {
     const pending = state.pendingOrder;
     if (!pending) return;
 
+    // ── Threshold re-validation at execution time ────────────────
+    // If thresholds vanished during the delay, abort rather than
+    // entering a position that can never resolve its outcome.
+    const polyThresholdCheck = resolveThreshold(polySnap);
+    const kalshiThresholdCheck = resolveThreshold(kalshiSnap);
+    if (
+      !polyThresholdCheck.value ||
+      polyThresholdCheck.value <= 0 ||
+      !kalshiThresholdCheck.value ||
+      kalshiThresholdCheck.value <= 0
+    ) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} PENDING_ABORT: threshold vanished during delay polyThreshold=${polyThresholdCheck.value ?? "null"} kalshiThreshold=${kalshiThresholdCheck.value ?? "null"}`,
+        "WARN",
+      );
+      state.pendingOrder = null;
+      return;
+    }
+
+    // ── Threshold divergence re-check at execution time ──────────
+    const confirmDivergence = Math.abs(polyThresholdCheck.value - kalshiThresholdCheck.value);
+    const confirmDivergencePct = confirmDivergence / Math.min(polyThresholdCheck.value, kalshiThresholdCheck.value);
+    if (THRESHOLD_DIVERGENCE_MAX > 0 && confirmDivergencePct > THRESHOLD_DIVERGENCE_MAX) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} PENDING_ABORT: threshold diverged during delay poly=${polyThresholdCheck.value.toFixed(2)} kalshi=${kalshiThresholdCheck.value.toFixed(2)} diff=${(confirmDivergencePct * 100).toFixed(2)}%`,
+        "WARN",
+      );
+      state.pendingOrder = null;
+      return;
+    }
+
     // Execution delay model: We are already committed. No abort possible.
     // Re-fetch post-delay books to determine actual fill.
     const fillBudget = resolveFillBudget(config);
-    const postDelayCandidate = fillBudget
-      ? buildCandidateNoValidation(
-          pending.direction,
-          polySnap,
-          kalshiSnap,
-          fillBudget,
-        )
-      : null;
+    let postDelayCandidate: ReturnType<typeof buildCandidateNoValidation> = null;
+    try {
+      postDelayCandidate = fillBudget
+        ? buildCandidateNoValidation(
+            pending.direction,
+            polySnap,
+            kalshiSnap,
+            fillBudget,
+          )
+        : null;
+    } catch {
+      // Post-delay book walk failed -- use original candidate
+    }
 
     // Use post-delay fill if available, otherwise fallback to original candidate
     const actualFill = postDelayCandidate?.estimate ?? pending.candidate;
     const actualGap = actualFill.gap;
     const slippage = actualGap - pending.originalGap;
+
+    // Safety: if the post-delay fill has a deeply negative gap, the
+    // opportunity evaporated. In paper mode we log this as slippage data.
+    // We still execute (committed), but log the warning.
+    if (actualGap < -0.10) {
+      this.logger.log(
+        `${polySnap.coin.toUpperCase()} SLIPPAGE_WARNING: post-delay gap=${actualGap.toFixed(4)} (was ${pending.originalGap.toFixed(4)}) -- opportunity evaporated`,
+        "WARN",
+      );
+    }
 
     state.position = {
       marketKey: pending.marketKey,
@@ -606,12 +742,14 @@ export class ArbitrageEngine {
     const slippageLabel =
       slippage >= 0 ? `+${slippage.toFixed(4)}` : slippage.toFixed(4);
     const fillSource = postDelayCandidate ? "post-delay" : "original";
+    const polyThresholdVal = resolveThreshold(polySnap).value;
+    const kalshiThresholdVal = resolveThreshold(kalshiSnap).value;
     this.logger.log(
       `${polySnap.coin.toUpperCase()} ARB_EXECUTED ${pending.direction} shares=${actualFill.shares} avgPoly=${actualFill.avgPoly.toFixed(
         4,
       )} avgKalshi=${actualFill.avgKalshi.toFixed(4)} cost=${actualFill.totalCost.toFixed(
         2,
-      )} gap=${actualGap.toFixed(4)} origGap=${pending.originalGap.toFixed(4)} slippage=${slippageLabel} fill=${fillSource}`,
+      )} gap=${actualGap.toFixed(4)} origGap=${pending.originalGap.toFixed(4)} slippage=${slippageLabel} fill=${fillSource} polyThreshold=${polyThresholdVal ?? "n/a"} kalshiThreshold=${kalshiThresholdVal ?? "n/a"} dataStatus=${resolveDataStatus(polySnap, kalshiSnap)}`,
     );
   }
 
@@ -697,13 +835,40 @@ export class ArbitrageEngine {
       }
     }
 
+    // ── Force-resolve stuck positions ────────────────────────────
+    // If both markets closed but we still can't resolve, eventually
+    // we MUST clean up to avoid blocking the coin forever.
+    const bothClosed = polyClosed && kalshiClosed;
+    const positionAge = nowMs - position.confirmedAtMs;
+    const needsForceResolve =
+      bothClosed && positionAge > POSITION_MAX_AGE_MS;
+    const needsAbsoluteForceResolve =
+      positionAge > POSITION_MAX_UNRESOLVED_MS;
+
+    if (
+      (needsForceResolve || needsAbsoluteForceResolve) &&
+      (position.polyOutcome === null || position.kalshiOutcome === null)
+    ) {
+      this.forceResolveOutcomes(position, nowMs);
+    }
+
     if (
       position.polyOutcome === null ||
       position.kalshiOutcome === null ||
       position.polyOutcome === "UNKNOWN" ||
       position.kalshiOutcome === "UNKNOWN"
     ) {
-      return;
+      // If we're past absolute force resolve and STILL stuck, force UNKNOWN
+      if (needsAbsoluteForceResolve) {
+        if (position.polyOutcome === null) position.polyOutcome = "UNKNOWN";
+        if (position.kalshiOutcome === null) position.kalshiOutcome = "UNKNOWN";
+        this.logger.log(
+          `${position.polySnap.coin.toUpperCase()} FORCED_TIMEOUT position age=${Math.round(positionAge / 1000)}s polyOutcome=${position.polyOutcome} kalshiOutcome=${position.kalshiOutcome}`,
+          "WARN",
+        );
+      } else {
+        return;
+      }
     }
 
     const polyWin = position.polyOutcome === position.polyTarget;
@@ -719,12 +884,13 @@ export class ArbitrageEngine {
     }
     this.summary.totalProfit += netPnl;
 
+    const posAgeSec = Math.round((nowMs - position.confirmedAtMs) / 1000);
     const result = `${netPnl >= 0 ? "WIN" : "LOSS"} net=${netPnl.toFixed(
       2,
     )} poly=${position.polyOutcome} kalshi=${position.kalshiOutcome}`;
     state.lastResult = result;
     this.logger.log(
-      `${position.polySnap.coin.toUpperCase()} ARB_RESOLVED ${result}`,
+      `${position.polySnap.coin.toUpperCase()} ARB_RESOLVED ${result} age=${posAgeSec}s payout=${payout.toFixed(2)} cost=${position.costTotal.toFixed(2)}`,
     );
 
     if (
@@ -791,8 +957,12 @@ export class ArbitrageEngine {
           );
         }
       })
-      .catch(() => {
+      .catch((err) => {
         position.polyOfficialFetchPending = false;
+        this.logger.log(
+          `OFFICIAL_FETCH_ERROR poly slug=${position.polySlug}: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
       });
   }
 
@@ -854,9 +1024,72 @@ export class ArbitrageEngine {
           );
         }
       })
-      .catch(() => {
+      .catch((err) => {
         position.kalshiOfficialFetchPending = false;
+        this.logger.log(
+          `OFFICIAL_FETCH_ERROR kalshi ticker=${position.kalshiSlug}: ${err instanceof Error ? err.message : "unknown"}`,
+          "WARN",
+        );
       });
+  }
+
+  /**
+   * Force-resolve outcomes when normal resolution has timed out.
+   * Uses best-effort data: official outcomes, computed from price+threshold,
+   * or copies from the platform that DID resolve.
+   */
+  private forceResolveOutcomes(
+    position: ArbitragePosition,
+    nowMs: number,
+  ): void {
+    const coin = position.polySnap.coin.toUpperCase();
+
+    // Try to resolve poly outcome if still null
+    if (position.polyOutcome === null) {
+      if (position.polyOfficialOutcome) {
+        position.polyOutcome = position.polyOfficialOutcome;
+      } else {
+        const threshold = resolveThreshold(position.polySnap).value;
+        const price =
+          position.polyClosePrice ??
+          position.polySnap.cryptoPrice ??
+          null;
+        if (price && price > 0 && threshold && threshold > 0) {
+          position.polyOutcome = computeOutcomeFromValues(price, threshold);
+        } else if (position.kalshiOutcome && position.kalshiOutcome !== "UNKNOWN") {
+          // Copy from Kalshi (same underlying asset, should agree)
+          position.polyOutcome = position.kalshiOutcome;
+          this.logger.log(
+            `${coin} FORCE_RESOLVE: copied kalshi outcome (${position.kalshiOutcome}) to poly (threshold=${threshold}, price=${price})`,
+            "WARN",
+          );
+        }
+      }
+    }
+
+    // Try to resolve kalshi outcome if still null
+    if (position.kalshiOutcome === null) {
+      if (position.kalshiOfficialOutcome) {
+        position.kalshiOutcome = position.kalshiOfficialOutcome;
+      } else {
+        const threshold = resolveThreshold(position.kalshiSnap).value;
+        const price =
+          position.kalshiClosePrice ??
+          (position.kalshiSnap.kalshiUnderlyingValue ?? null) ??
+          position.kalshiSnap.cryptoPrice ??
+          null;
+        if (price && price > 0 && threshold && threshold > 0) {
+          position.kalshiOutcome = computeOutcomeFromValues(price, threshold);
+        } else if (position.polyOutcome && position.polyOutcome !== "UNKNOWN") {
+          // Copy from Poly (same underlying asset, should agree)
+          position.kalshiOutcome = position.polyOutcome;
+          this.logger.log(
+            `${coin} FORCE_RESOLVE: copied poly outcome (${position.polyOutcome}) to kalshi (threshold=${threshold}, price=${price})`,
+            "WARN",
+          );
+        }
+      }
+    }
   }
 
   private logMismatch(position: ArbitragePosition, nowMs: number): void {
@@ -900,6 +1133,10 @@ export class ArbitrageEngine {
       kalshiCloseTimeIso: kalshiCloseIso,
       polyDataStatus: position.polySnap.dataStatus,
       kalshiDataStatus: position.kalshiSnap.dataStatus,
+      thresholdDivergencePct:
+        polyThreshold && kalshiThreshold && polyThreshold > 0 && kalshiThreshold > 0
+          ? ((Math.abs(polyThreshold - kalshiThreshold) / Math.min(polyThreshold, kalshiThreshold)) * 100).toFixed(4)
+          : null,
     };
 
     this.mismatchLogger.log(

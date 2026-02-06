@@ -18,7 +18,13 @@ export function randomDelayMs(minMs: number, maxMs: number): number {
 
 export function normalizeAsks(levels: OrderBookLevel[]): OrderBookLevel[] {
   return levels
-    .filter((level) => Number.isFinite(level.price) && level.price > 0)
+    .filter(
+      (level) =>
+        Number.isFinite(level.price) &&
+        level.price > 0 &&
+        Number.isFinite(level.size) &&
+        level.size > 0,
+    )
     .map((level) => ({
       price: level.price,
       size: Math.max(0, Math.floor(level.size)),
@@ -84,15 +90,24 @@ export function findMaxEqualShares(
     if (remainingB <= 0 && !advanceB()) break;
     if (remainingA <= 0 || remainingB <= 0) break;
 
-    const nextCostA = costA + priceA;
-    const nextCostB = costB + priceB;
-    if (nextCostA + nextCostB > budgetUsd) break;
+    const costPerShare = priceA + priceB;
+    if (costPerShare <= 0) break;
 
-    costA = nextCostA;
-    costB = nextCostB;
-    remainingA -= 1;
-    remainingB -= 1;
-    shares += 1;
+    // Compute how many shares we can fill at current price levels
+    const budgetRemaining = budgetUsd - costA - costB;
+    if (budgetRemaining < costPerShare) break;
+
+    const maxByBudget = Math.floor(budgetRemaining / costPerShare);
+    const maxByLiquidity = Math.min(remainingA, remainingB);
+    const batch = Math.min(maxByBudget, maxByLiquidity);
+
+    if (batch <= 0) break;
+
+    costA += priceA * batch;
+    costB += priceB * batch;
+    remainingA -= batch;
+    remainingB -= batch;
+    shares += batch;
   }
 
   if (shares <= 0) return null;

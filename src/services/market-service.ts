@@ -100,12 +100,20 @@ export function extractSlugFromUrl(url: string): string {
 /**
  * Fetches market details by slug.
  */
+const FETCH_TIMEOUT_MS = 10_000;
+
+function fetchWithTimeout(url: string, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 export async function getMarketBySlug(
   slug: string,
 ): Promise<MarketDetails | null> {
   try {
     const url = `${GAMMA_API_BASE}?slug=${encodeURIComponent(slug)}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -128,7 +136,7 @@ export async function getMarketById(id: string): Promise<MarketDetails | null> {
 
   try {
     const url = `${GAMMA_API_BASE}?id=${id}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -152,7 +160,7 @@ export async function searchByKeyword(
   try {
     // Search for open markets first (closed=false)
     const url = `${GAMMA_API_BASE}?query=${encodeURIComponent(keyword)}&limit=${limit}&closed=false`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return { markets: [], total: 0 };
 
     const data = await response.json();
@@ -166,7 +174,7 @@ export async function searchByKeyword(
     // If no open markets found, try broader search
     if (markets.length === 0) {
       const fallbackUrl = `${GAMMA_API_BASE}?query=${encodeURIComponent(keyword)}&limit=${limit}`;
-      const fallbackResponse = await fetch(fallbackUrl);
+      const fallbackResponse = await fetchWithTimeout(fallbackUrl);
       if (fallbackResponse.ok) {
         const fallbackData = await fallbackResponse.json();
         markets = Array.isArray(fallbackData) ? fallbackData : [];
@@ -263,7 +271,7 @@ export async function getEventBySlug(
 ): Promise<EventDetails | null> {
   try {
     const url = `${GAMMA_EVENTS_BASE}?slug=${encodeURIComponent(slug)}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -301,7 +309,7 @@ export async function getEventForMarket(
   // Try to find the event by searching events endpoint
   try {
     const url = `${GAMMA_EVENTS_BASE}?active=true&closed=false&limit=100`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -334,7 +342,7 @@ export async function getEventFromSeries(
 ): Promise<EventDetails | null> {
   try {
     const url = `${GAMMA_SERIES_BASE}?slug=${encodeURIComponent(seriesSlug)}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
 
     const data = await response.json();
@@ -382,7 +390,7 @@ export async function getSeriesBySlug(
 ): Promise<SeriesDetails | null> {
   try {
     const url = `${GAMMA_SERIES_BASE}?slug=${encodeURIComponent(slug)}`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return null;
     const data = await response.json();
     if (Array.isArray(data) && data.length > 0) {
@@ -495,7 +503,7 @@ export async function getHighVolumeMarkets(
 ): Promise<MarketSearchResult> {
   try {
     const url = `${GAMMA_API_BASE}?active=true&limit=${limit}&order=volume24hrClob&ascending=false`;
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) return { markets: [], total: 0 };
     const data = await response.json();
     const markets = Array.isArray(data) ? data : [];
